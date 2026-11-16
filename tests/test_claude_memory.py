@@ -16,6 +16,7 @@ from unittest.mock import Mock, patch
 import scripts.coding_discovery_tools.ai_tools_discovery as adm
 import scripts.coding_discovery_tools.cache as cache_mod
 import scripts.coding_discovery_tools.claude_memory_helpers as cmh
+import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.constants import MAX_CONFIG_FILE_SIZE, MAX_SEARCH_DEPTH
 from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
 from tests.test_queue_drain_budget import _DrivesMain, _SimulatedClock
@@ -52,6 +53,9 @@ class _MemoryHome(unittest.TestCase):
             patcher = patch.object(cache_mod, name, self.state_dir)
             patcher.start()
             self.addCleanup(patcher.stop)
+        sentry_patcher = patch.object(utils_mod, "_SENTRY_DSN", "")
+        sentry_patcher.start()
+        self.addCleanup(sentry_patcher.stop)
         self.cache_file = self.state_dir / cmh.MEMORY_CACHE_FILENAME
 
     def collect(self, home_user="alice"):
@@ -192,6 +196,22 @@ class TestMemoryDiscovery(_MemoryHome):
         with patch.object(cmh, "MAX_DIRS_PER_MEMORY_FOLDER", 3):
             self.assertEqual(self.collect()["folders"][0]["counts"]["total"], 2)
 
+    def test_a_memory_directory_listing_is_capped(self):
+        memory = _memory_dir(self.home)
+        for number in range(6):
+            _write(memory / f"topic-{number}.md", "topic\n")
+
+        with patch.object(cmh, "MAX_DIR_ENTRIES_SCANNED", 3):
+            self.assertEqual(self.collect()["folders"][0]["counts"]["total"], 3)
+
+    @unittest.skipUnless(os.name == "posix", "needs POSIX symlinks")
+    def test_a_self_looping_link_does_not_hide_the_folder(self):
+        memory = _memory_dir(self.home)
+        _write(memory / "MEMORY.md", "index\n")
+        os.symlink("loop", memory / "loop")
+
+        self.assertEqual(self.collect()["folders"][0]["counts"]["total"], 1)
+
     def test_project_folders_are_capped_in_name_order(self):
         for slug in ("-c", "-a", "-b"):
             _write(_memory_dir(self.home, slug) / "MEMORY.md", "index\n")
@@ -209,6 +229,26 @@ class TestMemoryDiscovery(_MemoryHome):
             names = [folder["agent_name"] for folder in self.collect()["folders"]]
 
         self.assertEqual(names, ["a", "b"])
+
+    def test_directory_entries_examined_are_capped_and_stop_at_the_deadline(self):
+        for name in "abcdef":
+            _write(self.home / ".claude" / "agent-memory" / name / "MEMORY.md", "index\n")
+
+        with patch.object(cmh, "MAX_DIR_ENTRIES_SCANNED", 3):
+            examined = len(self.collect()["folders"])
+
+        self.assertEqual(examined, 3)
+        self.assertEqual(cmh._subdirs(self.home / ".claude" / "agent-memory", 10, deadline=0.0), [])
+
+    def test_transcripts_examined_per_project_folder_are_capped(self):
+        project = self.home / ".claude" / "projects" / SLUG
+        for name in "abcd":
+            _write(project / (name + ".jsonl"), json.dumps({"type": "summary"}) + "\n")
+
+        with patch.object(cmh, "MAX_DIR_ENTRIES_SCANNED", 2):
+            _, read_names = self.collect_recording_reads()
+
+        self.assertEqual(len([name for name in read_names if name.endswith(".jsonl")]), 2)
 
     def test_memory_folders_per_user_are_capped(self):
         for slug in ("-a", "-b", "-c"):

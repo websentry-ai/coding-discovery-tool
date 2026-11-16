@@ -32,6 +32,7 @@ MAX_TRANSCRIPTS_TRIED = 5
 MAX_PROJECT_FOLDERS = 500
 MAX_SUBAGENT_FOLDERS_PER_BASE = 50
 MAX_MEMORY_FOLDERS = 150
+MAX_DIR_ENTRIES_SCANNED = 10000
 MAX_FLAGGED_FILES_PER_FOLDER = 50
 MAX_MEMORY_CONTENT_BYTES = 2 * 1024 * 1024
 MAX_URL_HOSTS_PER_FILE = 50
@@ -64,21 +65,31 @@ def _hostname(url: str) -> Optional[str]:
     return host if _HOSTNAME.fullmatch(host) else None
 
 
-def _subdirs(parent: Path, limit: int) -> List[Path]:
-    """The first `limit` real subdirectories of parent in name order."""
+def _entries(parent: Path, deadline: float) -> Iterator["os.DirEntry[str]"]:
+    """At most MAX_DIR_ENTRIES_SCANNED entries of parent, none once the deadline has passed."""
+    with os.scandir(parent) as entries:
+        for entry in islice(entries, MAX_DIR_ENTRIES_SCANNED):
+            if time.monotonic() >= deadline:
+                return
+            yield entry
+
+
+def _subdirs(parent: Path, limit: int, deadline: float) -> List[Path]:
+    """The first `limit` real subdirectories of the entries examined in parent, in name order."""
     try:
         return nsmallest(limit, (
-            Path(entry.path) for entry in os.scandir(parent)
+            Path(entry.path) for entry in _entries(parent, deadline)
             if entry.is_dir(follow_symlinks=False) and not is_symlink_or_junction(entry.path)))
     except (OSError, ValueError):
         return []
 
 
-def _project_path(claude_project_dir: Path) -> Tuple[Optional[str], bool]:
+def _project_path(claude_project_dir: Path, deadline: float) -> Tuple[Optional[str], bool]:
     """(the project's real path from a session transcript's cwd or None, False when a short head may still gain one)."""
     try:
-        transcripts = sorted(claude_project_dir.glob("*.jsonl"))[:MAX_TRANSCRIPTS_TRIED]
-    except OSError:
+        transcripts = [claude_project_dir / name for name in nsmallest(MAX_TRANSCRIPTS_TRIED, (
+            entry.name for entry in _entries(claude_project_dir, deadline) if entry.name.lower().endswith(".jsonl")))]
+    except (OSError, ValueError):
         return None, True
     settled = True
     for transcript in transcripts:
@@ -92,7 +103,7 @@ def _project_path(claude_project_dir: Path) -> Tuple[Optional[str], bool]:
                 continue
             if isinstance(cwd, str) and os.path.isabs(cwd):
                 return cwd, True
-    return None, settled
+    return None, settled and time.monotonic() < deadline
 
 
 def _cached_project_path(entry: object, dir_mtime: int) -> Tuple[bool, Optional[str]]:
@@ -118,7 +129,7 @@ def _resolved_project_path(
         return cached_path, cached_entry
     if time.monotonic() >= deadline:
         return None, None
-    project_path, settled = _project_path(project_dir)
+    project_path, settled = _project_path(project_dir, deadline)
     return project_path, {"project_path": project_path, "mtime": dir_mtime} if settled else None
 
 
@@ -139,11 +150,11 @@ def _relocated_memory_dir(home: Path) -> Optional[Path]:
     return path
 
 
-def _subagent_folders(base_dir: Path, project_path: Optional[str], scope: str) -> List[Dict]:
+def _subagent_folders(base_dir: Path, project_path: Optional[str], scope: str, deadline: float) -> List[Dict]:
     return [
         {"path": agent_dir, "project_path": project_path, "memory_type": "subagent",
          "agent_name": agent_dir.name, "scope": scope}
-        for agent_dir in _subdirs(base_dir, MAX_SUBAGENT_FOLDERS_PER_BASE)
+        for agent_dir in _subdirs(base_dir, MAX_SUBAGENT_FOLDERS_PER_BASE, deadline)
     ]
 
 
@@ -165,7 +176,7 @@ def _memory_folders(home: Path, deadline: float, cached_entries: Dict) -> Tuple[
     claude_dir = home / ".claude"
     resolved = {
         project_dir: _resolved_project_path(project_dir, cached_entries.get(str(project_dir)), deadline)
-        for project_dir in _subdirs(claude_dir / "projects", MAX_PROJECT_FOLDERS)
+        for project_dir in _subdirs(claude_dir / "projects", MAX_PROJECT_FOLDERS, deadline)
     }
     auto_folders = [
         {"path": project_dir / "memory", "memory_type": "auto", "scope": "user", "project_path": project_path}
@@ -180,11 +191,11 @@ def _memory_folders(home: Path, deadline: float, cached_entries: Dict) -> Tuple[
         folder
         for project_path in takewhile(lambda _: time.monotonic() < deadline, project_paths)
         for folder in (
-            _subagent_folders(Path(project_path) / ".claude" / "agent-memory", project_path, "project")
-            + _subagent_folders(Path(project_path) / ".claude" / "agent-memory-local", project_path, "local")
+            _subagent_folders(Path(project_path) / ".claude" / "agent-memory", project_path, "project", deadline)
+            + _subagent_folders(Path(project_path) / ".claude" / "agent-memory-local", project_path, "local", deadline)
         )
     ]
-    user_folders = _subagent_folders(claude_dir / "agent-memory", None, "user")
+    user_folders = _subagent_folders(claude_dir / "agent-memory", None, "user", deadline)
     first_by_path = {}
     for folder in chain(auto_folders, relocated_folders, user_folders, project_folders):
         if len(first_by_path) >= MAX_MEMORY_FOLDERS:
@@ -197,15 +208,23 @@ def _memory_folders(home: Path, deadline: float, cached_entries: Dict) -> Tuple[
 
 def _markdown_files(folder: Path, deadline: float) -> Iterator[Path]:
     """Every *.md under folder down to MAX_SEARCH_DEPTH, the folder's own MEMORY.md first; links are not entered."""
-    for directory, subdirs, names in islice(os.walk(folder), MAX_DIRS_PER_MEMORY_FOLDER):
-        if time.monotonic() >= deadline:
+    pending = [(folder, 0)]
+    for _ in range(MAX_DIRS_PER_MEMORY_FOLDER):
+        if not pending or time.monotonic() >= deadline:
             return
-        within_depth = len(Path(directory).relative_to(folder).parts) < MAX_SEARCH_DEPTH
-        subdirs[:] = sorted(
-            name for name in subdirs if within_depth and not is_symlink_or_junction(os.path.join(directory, name)))
+        directory, depth = pending.pop()
+        subdirs, names = [], []
+        try:
+            for entry in _entries(directory, deadline):
+                (subdirs if entry.is_dir(follow_symlinks=False) else names).append(entry.name)
+        except OSError:
+            continue
+        if depth < MAX_SEARCH_DEPTH:
+            pending.extend((directory / name, depth + 1) for name in sorted(subdirs, reverse=True)
+                           if time.monotonic() < deadline and not is_symlink_or_junction(directory / name))
         for name in sorted(names, key=lambda file_name: (file_name != INDEX_FILE_NAME, file_name)):
             if name.lower().endswith(".md"):
-                yield Path(directory) / name
+                yield directory / name
 
 
 def _cached_verdict(entry: object) -> Dict:

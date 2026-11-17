@@ -2412,11 +2412,13 @@ class AIToolsDetector:
         if 'permissions' in filtered_tool:
             perms = filtered_tool['permissions']
             settings_source = perms.get('settings_source', '')
-            settings_path_norm = _normalise_path(perms.get('settings_path', ''))
+            fold_case = str.lower if self.system == "Windows" else str
+            settings_path_norm = fold_case(_normalise_path(str(perms.get('settings_path') or '')))
+            home_norm = fold_case(user_home_norm)
             if (settings_source != 'managed'
                     and settings_path_norm
-                    and not (settings_path_norm == user_home_norm
-                             or settings_path_norm.startswith(user_home_norm + '/'))):
+                    and not (settings_path_norm == home_norm
+                             or settings_path_norm.startswith(home_norm + '/'))):
                 del filtered_tool['permissions']
         
         return filtered_tool

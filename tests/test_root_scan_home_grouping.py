@@ -55,6 +55,10 @@ def _skill_names(tool: dict) -> set:
     return {s.get("skill_name") for p in tool.get("projects", []) for s in p.get("skills", [])}
 
 
+def _plugin_names(tool: dict) -> set:
+    return {p.get("plugin_name") for p in tool.get("plugins", [])}
+
+
 class _RootScanCase(unittest.TestCase):
     """Two user homes plus a separate scanner home that plays root's home."""
 
@@ -85,6 +89,16 @@ class _RootScanCase(unittest.TestCase):
         scanner_keys = [p["path"] for p in processed.get("projects", [])
                         if Path(p["path"]) == self.scanner_home]
         self.assertEqual(scanner_keys, [], "user data was keyed under the scanner's home")
+
+    def assert_each_user_reports_only_own_plugins(self, processed: dict, expected: dict) -> None:
+        for user, home in self.homes.items():
+            filtered = self.detector.filter_tool_projects_by_user(processed, home)
+            self.assertEqual(_plugin_names(filtered), expected[user], f"{user} reports another user's plugins")
+            self.assertNotIn("_plugins_by_owner", filtered)
+            if not expected[user]:
+                self.assertNotIn("plugins", filtered)
+            report = self.detector.generate_single_tool_report(filtered, "dev", user)["tools"][0]
+            self.assertEqual([k for k in report if k.startswith("_")], [])
 
 
 class TestCoworkSkillsRootScan(_RootScanCase):
@@ -167,6 +181,56 @@ class TestClaudeCodePluginSkillsRootScan(_PluginRootScanCase):
         processed = self.detector.process_single_tool({"name": "Claude Code", "install_path": str(self.tmp)})
         self.assert_each_user_keeps_own_skills(processed, {u: {f"{u}-plugin-skill"} for u in USERS})
 
+    def test_each_user_reports_only_own_plugins(self):
+        processed = self.detector.process_single_tool({"name": "Claude Code", "install_path": str(self.tmp)})
+        self.assertEqual(_plugin_names(processed), {"alice-plugin", "bob-plugin"})
+        self.assert_each_user_reports_only_own_plugins(processed, {u: {f"{u}-plugin"} for u in USERS})
+
+    def test_root_own_plugins_reach_no_user(self):
+        install = self.scanner_home / ".claude" / "plugins" / "cache" / "mkt" / "root-plugin" / "1.0.0"
+        install.mkdir(parents=True)
+        (self.scanner_home / ".claude" / "plugins" / "installed_plugins.json").write_text(json.dumps({
+            "version": 2,
+            "plugins": {"root-plugin@mkt": [{"scope": "user", "installPath": str(install), "version": "1.0.0"}]},
+        }), encoding="utf-8")
+        processed = self.detector.process_single_tool({"name": "Claude Code", "install_path": str(self.tmp)})
+        self.assertIn("root-plugin", _plugin_names(processed))
+        self.assert_each_user_reports_only_own_plugins(processed, {u: {f"{u}-plugin"} for u in USERS})
+
+    def test_windows_home_case_and_slash_differences_still_match(self):
+        windows = AIToolsDetector(os_name="Windows")
+        tool = {"name": "Claude Code", "projects": [],
+                "plugins": [{"plugin_name": "a"}, {"plugin_name": "b"}],
+                "_plugins_by_owner": [("C:\\Users\\Alice\\", [{"plugin_name": "a"}]),
+                                      ("c:/users/al", [{"plugin_name": "b"}])]}
+        filtered = windows.filter_tool_projects_by_user(tool, Path("c:/users/alice"))
+        self.assertEqual(_plugin_names(filtered), {"a"})
+
+    def test_malformed_owner_data_drops_plugins_without_crashing(self):
+        for bad in (5, [None, 5, ("x",)], [("/home/alice", None)], [(None, [{"plugin_name": "a"}])]):
+            tool = {"name": "Claude Code", "projects": [], "plugins": [{"plugin_name": "a"}],
+                    "_plugins_by_owner": bad}
+            filtered = self.detector.filter_tool_projects_by_user(tool, self.homes["alice"])
+            self.assertNotIn("plugins", filtered)
+            self.assertNotIn("_plugins_by_owner", filtered)
+
+    def test_user_without_plugins_reports_none(self):
+        (self.homes["bob"] / ".claude" / "plugins" / "installed_plugins.json").unlink()
+        processed = self.detector.process_single_tool({"name": "Claude Code", "install_path": str(self.tmp)})
+        self.assert_each_user_reports_only_own_plugins(processed, {"alice": {"alice-plugin"}, "bob": set()})
+
+    def test_single_user_scan_keeps_own_plugins(self):
+        env = {"HOME": str(self.homes["alice"]), "USERPROFILE": str(self.homes["alice"])}
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(atd, "get_all_users_linux", return_value=["alice"]):
+            processed = self.detector.process_single_tool({"name": "Claude Code", "install_path": str(self.tmp)})
+        self.assertEqual(_plugin_names(processed), {"alice-plugin"})
+        report = self.detector.generate_single_tool_report(processed, "dev", "alice")["tools"][0]
+        self.assertEqual(_plugin_names(report), {"alice-plugin"})
+        self.assertEqual([k for k in report if k.startswith("_")], [])
+        filtered = self.detector.filter_tool_projects_by_user(processed, self.homes["alice"])
+        self.assertEqual(_plugin_names(filtered), {"alice-plugin"})
+
     def test_install_path_into_another_users_home_is_not_attributed(self):
         # installed_plugins.json is user-writable. Bob points his plugin at
         # Alice's install; a root scan must not file Alice's skill under Bob.
@@ -221,6 +285,19 @@ class TestCursorPluginSkillsRootScan(_PluginRootScanCase):
     def test_each_user_keeps_own_plugin_skills(self):
         processed = self.detector.process_single_tool({"name": "Cursor", "install_path": str(self.tmp)})
         self.assert_each_user_keeps_own_skills(processed, {u: {f"{u}-plugin-skill"} for u in USERS})
+
+    def test_each_user_reports_only_own_plugins(self):
+        processed = self.detector.process_single_tool({"name": "Cursor", "install_path": str(self.tmp)})
+        self.assertEqual(_plugin_names(processed), {"alice-plugin", "bob-plugin"})
+        self.assert_each_user_reports_only_own_plugins(processed, {u: {f"{u}-plugin"} for u in USERS})
+
+    def test_single_user_scan_keeps_own_plugins(self):
+        env = {"HOME": str(self.homes["alice"]), "USERPROFILE": str(self.homes["alice"])}
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(atd, "get_all_users_linux", return_value=["alice"]):
+            processed = self.detector.process_single_tool({"name": "Cursor", "install_path": str(self.tmp)})
+        filtered = self.detector.filter_tool_projects_by_user(processed, self.homes["alice"])
+        self.assertEqual(_plugin_names(filtered), {"alice-plugin"})
 
     def test_plugins_dir_symlink_into_another_home_is_not_attributed(self):
         # Bob replaces his ~/.cursor/plugins with a link to Alice's.

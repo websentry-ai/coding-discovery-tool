@@ -2023,6 +2023,7 @@ class AIToolsDetector:
             plugin_lookup = build_plugin_install_path_lookup(plugins) if plugins else {}
             if plugins:
                 tool["plugins"] = plugins
+                tool["_plugins_by_owner"] = plugin_groups
                 logger.info(f"  ✓ Found {len(plugins)} plugin(s)")
             else:
                 logger.info("  ℹ No plugins found")
@@ -2290,6 +2291,21 @@ class AIToolsDetector:
                 filtered_tool['permissions'] = own[0]  # already riskiest-first
             else:
                 filtered_tool.pop('permissions', None)
+
+        plugins_by_owner = filtered_tool.pop('_plugins_by_owner', None)
+        if plugins_by_owner is not None:
+            fold_case = str.lower if self.system == "Windows" else str
+            try:
+                own_plugins = [plugin for owner_home, group in plugins_by_owner
+                               if fold_case(_normalise_path(owner_home)) == fold_case(user_home_norm)
+                               for plugin in group]
+            except (TypeError, ValueError, AttributeError) as e:
+                logger.debug(f"Unreadable plugin owner data, dropping plugins: {e}")
+                own_plugins = []
+            if own_plugins:
+                filtered_tool['plugins'] = own_plugins
+            else:
+                filtered_tool.pop('plugins', None)
 
         if 'permissions' in filtered_tool:
             perms = filtered_tool['permissions']
@@ -3256,6 +3272,7 @@ class AIToolsDetector:
                 cursor_plugin_lookup = build_plugin_install_path_lookup(cursor_plugins) if cursor_plugins else {}
                 if cursor_plugins:
                     tool["plugins"] = cursor_plugins
+                    tool["_plugins_by_owner"] = cursor_plugin_groups
                     logger.info(f"  ✓ Found {len(cursor_plugins)} Cursor plugin(s)")
                 else:
                     logger.info("  ℹ No Cursor plugins found")
@@ -3579,6 +3596,9 @@ class AIToolsDetector:
         if "plugins" in tool:
             tool_dict["plugins"] = tool["plugins"]
             logger.info(f"  ✓ Added {len(tool['plugins'])} plugin(s) to {tool_name} report")
+
+        if "_plugins_by_owner" in tool:
+            tool_dict["_plugins_by_owner"] = tool["_plugins_by_owner"]
 
         if "_ide_folder" in tool:
             tool_dict["_ide_folder"] = tool["_ide_folder"]

@@ -339,7 +339,7 @@ def _folders_hash(folders: List[Dict]) -> str:
         {**folder, "index": stable(folder["index"]), "flagged": [stable(item) for item in folder["flagged"]]}
         for folder in folders
     ]
-    canonical = json.dumps(hashed, sort_keys=True, separators=(",", ":"))
+    canonical = json.dumps({"rules_version": RULES_VERSION, "folders": hashed}, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -393,7 +393,7 @@ def collect_claude_memories(home: Path, home_user: str) -> Optional[Dict]:
             logger.warning(f"Claude memory scan for {home_user} ran out of time; the next run resumes it")
             return None
         folders = [payload for payload, _ in scanned if payload]
-        return {"hash": _folders_hash(folders), "folders": folders}
+        return {"hash": _folders_hash(folders), "rules_version": RULES_VERSION, "folders": folders}
     except Exception as e:
         logger.warning(f"Claude memory discovery failed for {home_user}: {e}")
         report_to_sentry(e, {"phase": "memory_scan"}, level="warning")

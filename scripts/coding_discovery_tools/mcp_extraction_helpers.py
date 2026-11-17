@@ -2913,22 +2913,194 @@ def claude_cli_and_desktop_share_account(home: Path) -> bool:
     return True
 
 
+_SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
+_SESSION_MAX_BYTES = 5 * 1024 * 1024
+_SESSION_MAX_NAME_CHARS = 200
+# (lowercased name, lowercased host) of connectors the desktop app adds itself.
+_BUILTIN_REMOTE_CONNECTORS = (("visualize", "sandbox.claudemcpcontent.com"),)
+
+
+def _read_bounded_json(file: Path, boundary_real: Optional[str]) -> Any:
+    """Parse a regular file of at most 5 MB as JSON, else None; with a boundary it must live inside it."""
+    try:
+        if boundary_real is None:
+            fd = os.open(str(file), os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
+        else:
+            from .path_containment import open_contained
+            fd = open_contained(file, boundary_real)
+        with os.fdopen(fd, "rb") as handle:
+            status = os.fstat(handle.fileno())
+            if not stat.S_ISREG(status.st_mode) or status.st_size > _SESSION_MAX_BYTES:
+                return None
+            raw = handle.read(_SESSION_MAX_BYTES + 1)
+        if len(raw) > _SESSION_MAX_BYTES:
+            return None
+        return json.loads(raw.decode("utf-8", errors="replace"))
+    except (OSError, ValueError, RecursionError) as e:
+        logger.debug(f"Skipping unreadable Claude desktop file {file.name}: {type(e).__name__}")
+        return None
+
+
+def _child_dirs(parent: Path) -> List[Path]:
+    try:
+        with os.scandir(parent) as entries:
+            return [Path(entry.path) for entry in entries if entry.is_dir()]
+    except OSError:
+        return []
+
+
+def _session_files_under(org_dir: Path) -> List[Tuple[float, Path]]:
+    found: List[Tuple[float, Path]] = []
+    try:
+        with os.scandir(org_dir) as entries:
+            for entry in entries:
+                if entry.name.startswith("local_") and entry.name.endswith(".json") and entry.is_file():
+                    found.append((entry.stat().st_mtime, Path(entry.path)))
+    except OSError:
+        pass
+    return found
+
+
+def _desktop_account_folder(app_dir: Path, owner_home: Path, contained: bool) -> Optional[str]:
+    """The desktop app's `lastKnownAccountUuid`, only if it is a plain folder name."""
+    boundary_real = None
+    if contained:
+        from .path_containment import owned_boundary
+        boundary_real = owned_boundary(owner_home, app_dir)
+        if boundary_real is None:
+            return None
+    config = _read_bounded_json(app_dir / "config.json", boundary_real)
+    account = config.get("lastKnownAccountUuid") if isinstance(config, dict) else None
+    if not isinstance(account, str) or account in ("", ".", "..") or Path(account).name != account:
+        return None
+    return account
+
+
+def _newest_desktop_session_connectors(home: Path) -> Optional[Tuple[float, List[Any]]]:
+    """(mtime, `remoteMcpServersConfig`) of the newest session file from the last 30 days that has one."""
+    app_dir = _claude_app_support_dir(home)
+    running_as_root = hasattr(os, "geteuid") and os.geteuid() == 0
+    contained = running_as_root or os.path.realpath(str(home)) != os.path.realpath(str(Path.home()))
+    account = _desktop_account_folder(app_dir, home, contained)
+
+    session_roots: List[Tuple[Path, Optional[str]]] = []
+    for sub in _CLAUDE_SESSION_SUBDIRS:
+        sessions_dir = app_dir / sub
+        boundary_real = None
+        if contained:
+            from .path_containment import owned_boundary
+            boundary_real = owned_boundary(home, sessions_dir)
+            if boundary_real is None:
+                continue
+        session_roots.append((sessions_dir, boundary_real))
+
+    account_dirs = [(d, b) for root, b in session_roots for d in _child_dirs(root)]
+    preferred = [(d, b) for d, b in account_dirs if account and d.name.casefold() == account.casefold()]
+    cutoff = time.time() - _SESSION_MAX_AGE_SECONDS
+    candidates = [
+        (mtime, file, boundary_real)
+        for account_dir, boundary_real in (preferred or account_dirs)
+        for org_dir in _child_dirs(account_dir)
+        for mtime, file in _session_files_under(org_dir)
+        if mtime >= cutoff
+    ]
+    for mtime, file, boundary_real in sorted(candidates, key=lambda item: item[0], reverse=True):
+        data = _read_bounded_json(file, boundary_real)
+        configured = data.get("remoteMcpServersConfig") if isinstance(data, dict) else None
+        if isinstance(configured, list):
+            return mtime, configured
+    return None
+
+
+def _url_host(url: Any) -> str:
+    if not isinstance(url, str):
+        return ""
+    authority = url.split("://", 1)[-1]
+    for separator in "/?#":
+        authority = authority.split(separator, 1)[0]
+    return authority.rsplit("@", 1)[-1].split(":", 1)[0].lower()
+
+
+def _desktop_session_servers(configured: List[Any], observed_at: str) -> List[Dict[str, Any]]:
+    """Wire entries identical to what the CLI path emits for a claude.ai connector."""
+    servers: List[Dict[str, Any]] = []
+    for entry in configured:
+        name = entry.get("name") if isinstance(entry, dict) else None
+        if not isinstance(name, str) or not name.strip():
+            continue
+        name = name.strip()
+        if len(name) > _SESSION_MAX_NAME_CHARS or not name.isprintable():
+            continue
+        if (name.lower(), _url_host(entry.get("url"))) in _BUILTIN_REMOTE_CONNECTORS:
+            continue
+        server: Dict[str, Any] = {"name": CLAUDEAI_NAME_PREFIX + name, "scope": "claudeai"}
+        if isinstance(entry.get("tools"), list):
+            trimmed = _trim_tools(entry["tools"])
+            server["scan"] = {
+                "scanned_at": observed_at,
+                "tools": trimmed,
+                "tool_count": len(trimmed) if trimmed else 0,
+                "server_info": None,
+                "error": None,
+            }
+        servers.append(server)
+    return servers
+
+
+def append_desktop_session_claudeai_connectors(claude_dir: Path, projects: List[Dict]) -> None:
+    """Add-only: append connectors from the newest desktop session file that this home's entry lacks."""
+    try:
+        found = _newest_desktop_session_connectors(claude_dir.parent)
+        if not found:
+            return
+        mtime, configured = found
+        observed_at = (
+            datetime.datetime.fromtimestamp(mtime, tz=datetime.timezone.utc)
+            .replace(microsecond=0).isoformat()
+        )
+        added = _desktop_session_servers(configured, observed_at)
+    except Exception as e:
+        logger.debug(f"Error reading Claude desktop session connectors under {claude_dir.parent}: {e}")
+        return
+
+    project = next(
+        (p for p in projects if p.get("path") == str(claude_dir) and p.get("scope") == "claudeai"), None
+    )
+    known = {s["name"].lower() for p in ([project] if project else []) for s in p["mcpServers"]}
+    new_servers = []
+    for server in added:
+        if server["name"].lower() not in known:
+            known.add(server["name"].lower())
+            new_servers.append(server)
+    if not new_servers:
+        return
+    if project is None:
+        project = {"path": str(claude_dir), "mcpServers": [], "scope": "claudeai"}
+        projects.append(project)
+    project["mcpServers"].extend(new_servers)
+
+
 def extract_claudeai_mcp_servers_with_root_support(
     projects: List[Dict],
     home_filter: Optional[Callable[[Path], bool]] = None,
+    include_desktop_sessions: bool = False,
 ) -> None:
     """
     Extract claude.ai native connectors with root user support.
 
     When running as root/admin, scans all user directories. Otherwise checks
     only the current user's home directory. `home_filter`, when given, skips
-    every home for which it returns False.
+    the CLI-derived names of every home for which it returns False.
+    `include_desktop_sessions` then appends connectors from the desktop app's
+    session files, which `home_filter` does not gate.
     """
     import platform
 
     def extract_for_home(claude_dir: Path) -> None:
         if home_filter is None or home_filter(claude_dir.parent):
             extract_claudeai_mcp_servers(claude_dir, projects)
+        if include_desktop_sessions:
+            append_desktop_session_claudeai_connectors(claude_dir, projects)
 
     is_admin = False
     users_dir = None

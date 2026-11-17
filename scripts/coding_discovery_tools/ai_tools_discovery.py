@@ -113,7 +113,7 @@ try:
     from .utils import _is_scanning_users_own_home, _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, copilot_xcode_probes, copilot_app_probes, vs_probes, windows_user_path_dirs, install_surface_listing
     from .linux_extraction_helpers import linux_home_for_user
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
-    from .settings_transformers import transform_settings_to_backend_format
+    from .settings_transformers import MACHINE_SCOPES, transform_settings_to_backend_format
     from .user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
     from .install_path_version import (
         is_self_updating, is_unknown_version, newest_version, runtime_version, version_from_install_path)
@@ -202,7 +202,7 @@ except ImportError:
     from scripts.coding_discovery_tools.utils import _is_scanning_users_own_home, _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, copilot_xcode_probes, copilot_app_probes, vs_probes, windows_user_path_dirs, install_surface_listing
     from scripts.coding_discovery_tools.linux_extraction_helpers import linux_home_for_user
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
-    from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
+    from scripts.coding_discovery_tools.settings_transformers import MACHINE_SCOPES, transform_settings_to_backend_format
     from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
     from scripts.coding_discovery_tools.install_path_version import (
         is_self_updating, is_unknown_version, newest_version, runtime_version, version_from_install_path)
@@ -352,6 +352,44 @@ def _install_in_another_users_home(tool: Dict, user_home, other_homes) -> bool:
         if theirs and theirs != mine and (path == theirs or path.startswith(theirs + "/")):
             return True
     return False
+
+
+def _under_home(path: str, home: Path) -> bool:
+    """Whether ``path`` is ``home`` or inside it."""
+    fold_case = str.lower if os.name == "nt" else str
+    path_norm, home_norm = (fold_case(_normalise_path(str(value or ""))) for value in (path, home))
+    return bool(path_norm and home_norm) and (path_norm == home_norm or path_norm.startswith(home_norm + "/"))
+
+
+def _permissions_from_own_settings(tool_name: Optional[str], own_settings: List[Dict]) -> Optional[Dict]:
+    """The permissions record built from one user's settings plus machine-managed ones; None when there are none."""
+    if not own_settings:
+        return None
+    try:
+        if (tool_name or "").lower() in ("cursor", "cursor cli"):
+            return own_settings[0]  # already backend-ready, highest precedence first
+        return transform_settings_to_backend_format(own_settings)
+    except Exception as e:
+        logger.warning(f"Could not build per-user permissions for {tool_name}: {e}", exc_info=True)
+        return None
+
+
+def _with_own_permissions(tool: Dict, user_home: Path) -> Dict:
+    """``tool`` without its settings list, permissions rebuilt when some settings are neither this user's nor managed."""
+    all_settings = tool.get('_all_settings')
+    scoped = {key: value for key, value in tool.items() if key != '_all_settings'}
+    if not isinstance(all_settings, list):
+        return scoped
+    own_settings = [s for s in all_settings
+                    if isinstance(s, dict) and ((s.get('scope') or s.get('settings_source')) in MACHINE_SCOPES
+                                                or _under_home(s.get('settings_path', ''), user_home))]
+    if len(own_settings) < len(all_settings):
+        own_permissions = _permissions_from_own_settings(tool.get('name'), own_settings)
+        if own_permissions:
+            scoped['permissions'] = own_permissions
+        else:
+            scoped.pop('permissions', None)
+    return scoped
 
 
 # Mirrors the machine-global candidate lists in user_tool_detector.
@@ -533,6 +571,62 @@ def _with_user_version(tool: Dict, report: Dict, user_home: Path) -> Dict:
     if not is_unknown_version(install):
         version = install if is_unknown_version(version) else newest_version(version, install)
     return {**report, "version": version}
+
+
+def _tool_for_user(detector: "AIToolsDetector", tool: Dict, tool_with_projects: Dict, user_name: str,
+                   user_home: Path, scanned_manifest: set) -> Optional[Dict]:
+    """This user's report view of a processed tool; None (and out of the manifest) when they get no row."""
+    # all_tools is deduped globally; skip users who didn't detect this tool (avoids phantom installs).
+    if _install_key(user_name, tool) not in scanned_manifest:
+        return None
+
+    tool_name = tool.get('name', 'Unknown')
+    tool_filtered = detector.filter_tool_projects_by_user(_with_own_permissions(tool_with_projects, user_home),
+                                                          user_home)
+    tool_filtered = _with_user_version(tool, tool_filtered, user_home)
+
+    # Owned by someone else, unless this user has their own data
+    # for it: Copilot's install_path is the shared binary.
+    if _machine_global_install_disowned(tool, user_home) \
+            and not _has_user_owned_data(tool_name, tool_filtered, user_home):
+        logger.info(
+            f"  Skipping {tool_name} for {user_name}: "
+            f"{tool.get('install_path')!r} is owned by another user "
+            f"and this user has no data for it"
+        )
+        scanned_manifest.discard(_install_key(user_name, tool))
+        return None
+
+    # Ownership gate (Copilot CLI only): suppress a phantom install
+    # row for a user who neither owns the detected ~/.copilot config
+    # dir nor has per-user data. filter_tool_projects_by_user scopes
+    # projects/permissions but never rewrites the paths, so the gate
+    # is needed.
+    if tool_name == "GitHub Copilot CLI" and not _copilot_cli_owned_by_user(tool_filtered, user_home):
+        logger.info(
+            f"  Skipping Copilot CLI for {user_name}: config dir "
+            f"{tool_filtered.get('_config_path') or tool_filtered.get('install_path')!r} "
+            f"not owned by this user and no per-user data"
+        )
+        # Detected globally but not owned by this user -> drop the presence entry.
+        scanned_manifest.discard(_install_key(user_name, tool))
+        return None
+
+    # Ownership gate (Augment surfaces): same ~/.augment-keyed
+    # logic so a non-owner under a root scan doesn't get a
+    # phantom surface row.
+    if (tool_name == "Auggie CLI" or tool_name.lower().startswith("augment (")) \
+            and not _augment_owned_by_user(tool_filtered, user_home):
+        logger.info(
+            f"  Skipping {tool_name} for {user_name}: config dir "
+            f"{tool_filtered.get('_config_path') or tool_filtered.get('install_path')!r} "
+            f"not owned by this user and no per-user data"
+        )
+        # Detected globally but not owned by this user -> drop the presence entry.
+        scanned_manifest.discard(_install_key(user_name, tool))
+        return None
+
+    return tool_filtered
 
 
 def _fill_version_from_install_path(tool_info, user_home: Path) -> None:
@@ -1370,7 +1464,9 @@ class AIToolsDetector:
         connector_projects: List[Dict] = []
         try:
             extract_claudeai_mcp_servers_with_root_support(
-                connector_projects, home_filter=claude_cli_and_desktop_share_account
+                connector_projects,
+                home_filter=claude_cli_and_desktop_share_account,
+                include_desktop_sessions=True,
             )
             self._merge_mcp_configs_into_projects(connector_projects, projects_dict)
         except Exception as e:
@@ -2318,11 +2414,13 @@ class AIToolsDetector:
         if 'permissions' in filtered_tool:
             perms = filtered_tool['permissions']
             settings_source = perms.get('settings_source', '')
-            settings_path_norm = _normalise_path(perms.get('settings_path', ''))
+            fold_case = str.lower if self.system == "Windows" else str
+            settings_path_norm = fold_case(_normalise_path(str(perms.get('settings_path') or '')))
+            home_norm = fold_case(user_home_norm)
             if (settings_source != 'managed'
                     and settings_path_norm
-                    and not (settings_path_norm == user_home_norm
-                             or settings_path_norm.startswith(user_home_norm + '/'))):
+                    and not (settings_path_norm == home_norm
+                             or settings_path_norm.startswith(home_norm + '/'))):
                 del filtered_tool['permissions']
         
         return filtered_tool
@@ -3293,10 +3391,11 @@ class AIToolsDetector:
             logger.info(f"  Extracting {tool_name} settings...")
             if self._cursor_settings_extractor:
                 try:
-                    settings = self._cursor_settings_extractor.extract_settings()
-                    if settings:
+                    settings_by_user = self._cursor_settings_extractor.extract_settings_by_user()
+                    if settings_by_user:
                         logger.info(f"  ✓ Found Cursor settings")
-                        tool["_settings"] = settings
+                        tool["_settings"] = settings_by_user[0]
+                        tool["_all_settings"] = settings_by_user
                     else:
                         logger.info("  ℹ No Cursor settings found")
                 except Exception as e:
@@ -3637,6 +3736,7 @@ class AIToolsDetector:
 
                 if permissions:
                     tool_dict["permissions"] = permissions
+                    tool_dict["_all_settings"] = tool.get("_all_settings", tool["_settings"])
                     logger.info(f"  ✓ Added permissions to {tool_name} report")
                     detail_logger.info(f"  Permissions keys: {list(permissions.keys())}")
                 else:
@@ -4422,54 +4522,10 @@ def main():
                         continue
 
                     try:
-                        # all_tools is deduped globally; skip users who didn't detect this tool (avoids phantom installs).
-                        if _install_key(user_name, tool) not in scanned_manifest:
-                            continue
-
-                        # Filter projects to only include this user's projects
                         with time_step("filter_projects", "process"):
-                            tool_filtered = detector.filter_tool_projects_by_user(tool_with_projects, user_home)
-                        tool_filtered = _with_user_version(tool, tool_filtered, user_home)
-
-                        # Owned by someone else, unless this user has their own data
-                        # for it: Copilot's install_path is the shared binary.
-                        if _machine_global_install_disowned(tool, user_home) \
-                                and not _has_user_owned_data(tool_name, tool_filtered, user_home):
-                            logger.info(
-                                f"  Skipping {tool_name} for {user_name}: "
-                                f"{tool.get('install_path')!r} is owned by another user "
-                                f"and this user has no data for it"
-                            )
-                            scanned_manifest.discard(_install_key(user_name, tool))
-                            continue
-
-                        # Ownership gate (Copilot CLI only): suppress a phantom install
-                        # row for a user who neither owns the detected ~/.copilot config
-                        # dir nor has per-user data. filter_tool_projects_by_user scopes
-                        # projects/permissions but never rewrites the paths, so the gate
-                        # is needed.
-                        if tool_name == "GitHub Copilot CLI" and not _copilot_cli_owned_by_user(tool_filtered, user_home):
-                            logger.info(
-                                f"  Skipping Copilot CLI for {user_name}: config dir "
-                                f"{tool_filtered.get('_config_path') or tool_filtered.get('install_path')!r} "
-                                f"not owned by this user and no per-user data"
-                            )
-                            # Detected globally but not owned by this user -> drop the presence entry.
-                            scanned_manifest.discard(_install_key(user_name, tool))
-                            continue
-
-                        # Ownership gate (Augment surfaces): same ~/.augment-keyed
-                        # logic so a non-owner under a root scan doesn't get a
-                        # phantom surface row.
-                        if (tool_name == "Auggie CLI" or tool_name.lower().startswith("augment (")) \
-                                and not _augment_owned_by_user(tool_filtered, user_home):
-                            logger.info(
-                                f"  Skipping {tool_name} for {user_name}: config dir "
-                                f"{tool_filtered.get('_config_path') or tool_filtered.get('install_path')!r} "
-                                f"not owned by this user and no per-user data"
-                            )
-                            # Detected globally but not owned by this user -> drop the presence entry.
-                            scanned_manifest.discard(_install_key(user_name, tool))
+                            tool_filtered = _tool_for_user(detector, tool, tool_with_projects, user_name,
+                                                           user_home, scanned_manifest)
+                        if tool_filtered is None:
                             continue
 
                         # Detect subscription plan for Claude Code

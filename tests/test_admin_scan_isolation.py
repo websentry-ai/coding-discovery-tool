@@ -388,7 +388,7 @@ def build_user_reports(machine: FakeMachine) -> dict:
         for user, home in homes.items():
             if atd._install_in_another_users_home(tool, home, all_homes):
                 continue
-            filtered = atd._tool_for_user(detector, tool, processed, user, home, all_homes, manifest)
+            filtered = atd._tool_for_user(detector, tool, processed, user, home, manifest)
             if filtered is None:
                 continue
             key = f"{name} @ {tool.get('install_path')}" if name in reports[user] else name
@@ -519,6 +519,12 @@ class TestDarwinAdminScanIsolation(_AdminScanChecks, unittest.TestCase):
         managed = {"Library/Application Support/ClaudeCode/managed-settings.json":
                    json.dumps({"permissions": {"deny": ["Bash(curl:*)"]}})}
         self.assert_isolated(machine_files=managed, tools=["Claude Code"])
+
+    def test_riskier_settings_outside_every_users_home_reach_no_user(self):
+        # The Linux walk only visits listed homes, so only the macOS walk can pick these up.
+        risky = json.dumps({"permissions": {"allow": ["Bash"], "defaultMode": "bypassPermissions"}})
+        stray = {"Users/Shared/.claude/settings.json": risky, "Users/Shared/proj/.claude/settings.json": risky}
+        self.assert_isolated(tools=["Claude Code"], machine_files=stray)
 
 
 @unittest.skipIf(os.name == "nt", "simulates POSIX homes and uids; Windows paths are not faked")

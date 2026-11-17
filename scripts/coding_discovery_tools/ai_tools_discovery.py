@@ -21,7 +21,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Callable, Sequence, Tuple
+from typing import Dict, Iterator, List, Optional, Callable, Tuple
 
 # Self-imposed run timeout (seconds). Discovery enforces its OWN deadline rather
 # than only being force-killed by the parent onboard/setup subprocess timeout, so
@@ -113,7 +113,7 @@ try:
     from .utils import _is_scanning_users_own_home, _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, copilot_xcode_probes, copilot_app_probes, vs_probes, windows_user_path_dirs, install_surface_listing
     from .linux_extraction_helpers import linux_home_for_user
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
-    from .settings_transformers import transform_settings_to_backend_format
+    from .settings_transformers import MACHINE_SCOPES, transform_settings_to_backend_format
     from .user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
     from .install_path_version import (
         is_self_updating, is_unknown_version, newest_version, runtime_version, version_from_install_path)
@@ -202,7 +202,7 @@ except ImportError:
     from scripts.coding_discovery_tools.utils import _is_scanning_users_own_home, _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, copilot_xcode_probes, copilot_app_probes, vs_probes, windows_user_path_dirs, install_surface_listing
     from scripts.coding_discovery_tools.linux_extraction_helpers import linux_home_for_user
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
-    from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
+    from scripts.coding_discovery_tools.settings_transformers import MACHINE_SCOPES, transform_settings_to_backend_format
     from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
     from scripts.coding_discovery_tools.install_path_version import (
         is_self_updating, is_unknown_version, newest_version, runtime_version, version_from_install_path)
@@ -354,12 +354,11 @@ def _install_in_another_users_home(tool: Dict, user_home, other_homes) -> bool:
     return False
 
 
-def _under_any_home(path: str, homes: Sequence[Path]) -> bool:
-    """Whether ``path`` is one of ``homes`` or inside one."""
-    path_norm = _normalise_path(str(path or ""))
-    home_norms = [_normalise_path(str(home)) for home in homes]
-    return bool(path_norm) and any(home_norm and (path_norm == home_norm or path_norm.startswith(home_norm + "/"))
-                                   for home_norm in home_norms)
+def _under_home(path: str, home: Path) -> bool:
+    """Whether ``path`` is ``home`` or inside it."""
+    fold_case = str.lower if os.name == "nt" else str
+    path_norm, home_norm = (fold_case(_normalise_path(str(value or ""))) for value in (path, home))
+    return bool(path_norm and home_norm) and (path_norm == home_norm or path_norm.startswith(home_norm + "/"))
 
 
 def _permissions_from_own_settings(tool_name: Optional[str], own_settings: List[Dict]) -> Optional[Dict]:
@@ -375,14 +374,15 @@ def _permissions_from_own_settings(tool_name: Optional[str], own_settings: List[
         return None
 
 
-def _with_own_permissions(tool: Dict, other_homes: Sequence[Path]) -> Dict:
-    """``tool`` without its settings list, permissions rebuilt when some settings sit in other users' homes."""
+def _with_own_permissions(tool: Dict, user_home: Path) -> Dict:
+    """``tool`` without its settings list, permissions rebuilt when some settings are neither this user's nor managed."""
     all_settings = tool.get('_all_settings')
-    if not isinstance(all_settings, list):
-        return tool
     scoped = {key: value for key, value in tool.items() if key != '_all_settings'}
+    if not isinstance(all_settings, list):
+        return scoped
     own_settings = [s for s in all_settings
-                    if isinstance(s, dict) and not _under_any_home(s.get('settings_path', ''), other_homes)]
+                    if isinstance(s, dict) and ((s.get('scope') or s.get('settings_source')) in MACHINE_SCOPES
+                                                or _under_home(s.get('settings_path', ''), user_home))]
     if len(own_settings) < len(all_settings):
         own_permissions = _permissions_from_own_settings(tool.get('name'), own_settings)
         if own_permissions:
@@ -574,22 +574,14 @@ def _with_user_version(tool: Dict, report: Dict, user_home: Path) -> Dict:
 
 
 def _tool_for_user(detector: "AIToolsDetector", tool: Dict, tool_with_projects: Dict, user_name: str,
-                   user_home: Path, all_user_homes: List[Path], scanned_manifest: set) -> Optional[Dict]:
+                   user_home: Path, scanned_manifest: set) -> Optional[Dict]:
     """This user's report view of a processed tool; None (and out of the manifest) when they get no row."""
     # all_tools is deduped globally; skip users who didn't detect this tool (avoids phantom installs).
     if _install_key(user_name, tool) not in scanned_manifest:
         return None
 
     tool_name = tool.get('name', 'Unknown')
-    elevated = os.getuid() == 0 if hasattr(os, "getuid") else _windows_process_is_elevated()
-    # An elevated scanner's own home (/var/root, /root) is never the reported user's.
-    try:
-        scanner_home = [Path.home()] if elevated else []
-    except RuntimeError:
-        scanner_home = []
-    other_homes = [home for home in [*all_user_homes, *scanner_home]
-                   if _normalise_path(str(home)) != _normalise_path(str(user_home))]
-    tool_filtered = detector.filter_tool_projects_by_user(_with_own_permissions(tool_with_projects, other_homes),
+    tool_filtered = detector.filter_tool_projects_by_user(_with_own_permissions(tool_with_projects, user_home),
                                                           user_home)
     tool_filtered = _with_user_version(tool, tool_filtered, user_home)
 
@@ -4528,7 +4520,7 @@ def main():
                     try:
                         with time_step("filter_projects", "process"):
                             tool_filtered = _tool_for_user(detector, tool, tool_with_projects, user_name,
-                                                           user_home, all_user_homes, scanned_manifest)
+                                                           user_home, scanned_manifest)
                         if tool_filtered is None:
                             continue
 

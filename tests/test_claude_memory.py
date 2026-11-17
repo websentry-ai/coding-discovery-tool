@@ -16,13 +16,123 @@ from unittest.mock import Mock, patch
 import scripts.coding_discovery_tools.ai_tools_discovery as adm
 import scripts.coding_discovery_tools.cache as cache_mod
 import scripts.coding_discovery_tools.claude_memory_helpers as cmh
+import scripts.coding_discovery_tools.memory_secret_rules as memory_secret_rules
 import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.constants import MAX_CONFIG_FILE_SIZE, MAX_SEARCH_DEPTH
 from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
 from tests.test_queue_drain_budget import _DrivesMain, _SimulatedClock
 
 FAKE_SECRET = "ghp_" + "a1B2c3D4" * 4 + "e5F6"
+EMPTY_BLOCK_HASH = hashlib.sha256(
+    json.dumps({"rules_version": cmh.RULES_VERSION, "folders": []}, sort_keys=True, separators=(",", ":")).encode()
+).hexdigest()
 SLUG = "-work-shop"
+
+# Must equal the same constant in the other repo (coding-discovery-tool / ai-gateway-data).
+MEMORY_SECRET_RULES_SHA256 = "1a14c32a69d474739cc76dd3ba84494bc6fb48c17a5106209e50c4d942a2151c"
+
+PRIVATE_KEY_BLOCK = (
+    "-----BEGIN RSA PRIVATE KEY-----\n" + "MIIEowIBAAKCAQEA1b2c3d4e5f6g7h8i9j0k1l2m3n4\n" * 3
+    + "-----END RSA PRIVATE KEY-----"
+)
+
+# (label, line); all values are fake. The same lists are kept in both repos' tests.
+SHOULD_MASK = [
+    ("AWS access key", "aws key: AKIAIOSFODNN7EXAMPLE"),
+    ("GitHub PAT", "token: ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"),
+    ("OpenAI project key", "OPENAI_API_KEY=sk-proj-" + "Ab3dEf6hIj9kLm2nOp5qRs8tUv1wXy4zAb7cDe0fGh3iJk6l"),
+    ("Stripe live key", "stripe: sk_live_" + "4eC39HqLyjWDarjtT1zdp7dc"),
+    ("Slack bot token", "slack: xoxb-" + "123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx"),
+    ("npm token", "//registry.npmjs.org/:_authToken=npm_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"),
+    ("JWT", "auth: eyJhbGciOiJIUzI1NiJ9" + ".eyJzdWIiOiIxMjM0NTY3ODkwIn0"
+     + ".dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"),
+    ("Discord bot token", "discord: MTk4NjIyNDgzNDcxOTI1MjQ4" + ".Cl2FMQ" + ".ZnCjm1XVW7vRze4b7Cq4se7kKWs"),
+    ("Private key block", PRIVATE_KEY_BLOCK),
+    ("Postgres URL with password", "DATABASE_URL=postgres://app:S3cretPass9@db.internal:5432/app"),
+    ("MongoDB SRV URL with password", "mongodb+srv://admin:Adm1nPass99@cluster0.abc12.mongodb.net/prod"),
+    ("Redis URL with password", "REDIS_URL=redis://:R3disPass9word@cache.internal:6379/0"),
+    ("HTTPS basic auth in URL", "git remote: https://deploy:hunter2pass9@git.example.com/repo.git"),
+    ("MySQL URL with password", "mysql://root:R00tPass!@10.0.0.5:3306/app"),
+    ("Quoted password", 'password = "Sup3rS3cret!"'),
+    ("JSON password", '{"password": "Sup3rS3cret!"}'),
+    ("JSON api key", '{"api_key": "a1b2c3d4e5f6g7h8i9j0"}'),
+    ("JSON secret", '{"secret": "q8Zr2LmP0xVb7NcT"}'),
+    ("Multi-line quoted password", 'password =\n  "Sup3rS3cretValue"'),
+    ("YAML unquoted password", "password: Sup3rS3cret9"),
+    ("Env var password", "DB_PASSWORD=Sup3rS3cret9"),
+    ("Terraform var password", "TF_VAR_db_password=Pa55w0rdProd"),
+    ("Env var token", "export API_TOKEN=a1b2c3d4e5f6g7h8"),
+    ("Passphrase", "passphrase: c0rrect-h0rse-battery"),
+    ("camelCase apiKey", "apiKey: AbC123dEf456GhI789"),
+    ("SECRET_KEY_BASE", "SECRET_KEY_BASE=9f8e7d6c5b4a3a2b1c0d"),
+    ("Password key ending in said", "db_password_said=Hunter2hunter2"),
+    ("AWS secret starting with slash", "aws_secret_access_key=/K7MDENGbPxRfiCYzz12abQ"),
+    ("AWS secret with inner slashes", "aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCY1"),
+    ("API key in URL query", "curl https://api.example.com/v1/data?api_key=a1b2c3d4e5f6g7h8i9"),
+    ("Presigned URL signature", "https://b.s3.amazonaws.com/f.zip?X-Amz-Signature=9f86d081884c7d659a2feaa0c55ad015"),
+    ("Webhook token in query", "https://api.example.com/hook?token=tk_8Hq2Lz9Xv4Pw"),
+    ("Bearer header in curl", "curl -H 'Authorization: Bearer abc123def456ghi789jkl' https://api.example.com"),
+    ("Bearer header", "Authorization: Bearer abc123def456ghi789jkl"),
+    ("Bearer in capitals", "Authorization: BEARER abc123def456ghi789jkl"),
+    ("Quoted password starting with a placeholder word", 'password = "Password123!"'),
+    ("Quoted password starting with a dollar", 'password = "$up3rS3cret!"'),
+    ("Lowercase joined secret key", "secretkey: abc123def456ghi"),
+    ("All-digit password", "DB_PASSWORD=20240101"),
+    ("Hex key in URL query", "https://api.example.com/x?key=" + "8A3F09B2C4D5E6F708192A3B4C5D6E7F"),
+    ("UUID key in URL query", "https://api.example.com/data?key=" + "6a41c739-57cf-46a9-b53d-cda412bb3d24"),
+    ("Mixed-case hyphenated key in URL query", "https://x.example.com/a?key=" + "abc-DEF-123-ghi-456-JKL-789"),
+    ("Long all-digit token", "API_TOKEN=" + "12345678901234567890"),
+    ("Google API key with a hyphen in URL query",
+     "https://maps.googleapis.com/maps/api/geocode/json?key=" + "AIza" + "SyD-3x4mpl3K3y_abcdefghijklmnopqrst"),
+    ("Private key with a short last line", PRIVATE_KEY_BLOCK.replace("-----END", "AB==\n-----END")),
+    ("Encrypted private key", PRIVATE_KEY_BLOCK.replace("RSA", "ENCRYPTED")),
+]
+
+SHOULD_NOT_MASK = [
+    ("Env lookup in code", 'password = os.environ["DB_PASSWORD"]'),
+    ("Shell variable", "DB_PASSWORD=${DB_PASSWORD}"),
+    ("Placeholder in angle brackets", "password: <your-password>"),
+    ("CI secret reference", "token: {{ secrets.GH_TOKEN }}"),
+    ("Vault command substitution", 'export VAULT_TOKEN="$(vault print token)"'),
+    ("Placeholder changeme", 'password = "changeme"'),
+    ("Masked stars in JSON", '{"password": "********"}'),
+    ("Redacted placeholder", '"password": "<redacted>"'),
+    ("Placeholder AWS key of Xs", "aws key: AKIAXXXXXXXXXXXXXXXX"),
+    ("Token TTL setting", "TOKEN_TTL_MS=86400000"),
+    ("Token expiry seconds", "token_expiry_seconds=3600"),
+    ("Password min length", "password_min_length: 12"),
+    ("K8s secret name", "secret_name: prod-db-credentials-v2"),
+    ("Secret id key", "client_secret_id=Abc123Def456"),
+    ("camelCase id key", "tokenId=abc123def456"),
+    ("camelCase name key", "apiKeyName: myservice2"),
+    ("Password expiry timestamp", "password_expires_at=1731849600"),
+    ("Quoted shell variable", 'password = "$DB_PASSWORD"'),
+    ("Private key placeholder", "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"),
+    ("pwd under the root home", "pwd: /root/repo2"),
+    ("Long docs slug key", "https://docs.example.com/a?key=getting-started-with-v2-guide"),
+    ("pwd output", "pwd: /Users/dev/repo2"),
+    ("pwd home path", "pwd: ~/code/app-v3"),
+    ("Password reset URL", "password_reset_url: https://app.example.com/v2/reset"),
+    ("OAuth token endpoint", "token_endpoint: https://login.example.com/oauth2/v2.0/token"),
+    ("Secret ARN", "secret_arn: arn:aws:secretsmanager:us-west-2:123456789012:secret:prod/db-AbCdEf"),
+    ("Django hasher setting", "PASSWORD_HASHERS=django.contrib.auth.hashers.Argon2PasswordHasher"),
+    ("Password file path", "PASSWORD_FILE=/run/secrets/db_password"),
+    ("Token cache path", "TOKEN_CACHE=/var/cache/app/token2024"),
+    ("Token store Windows path", "TOKEN_STORE=C:\\Users\\me\\token2024"),
+    ("Password store relative path", "PASSWORD_STORE=../secrets/store2"),
+    ("Token scopes", "GITHUB_TOKEN_SCOPES=repo,workflow,read:org"),
+    ("Env reference in JS", "apiKey: process.env.API_KEY"),
+    ("Docs link with key param", "see https://docs.example.com/search?key=getting-started-v2"),
+    ("Docs link page param", "https://docs.example.com/guide?page=2&sort=asc"),
+    ("Postgres URL no password", "postgres://localhost:5432/app"),
+    ("SSH git remote", "git clone git@github.com:org/repo.git"),
+    ("Password policy prose", "Passwords must be at least 12 characters long."),
+    ("UI label constant", 'static let forgotPassword = "Forgot Password?"'),
+    ("Bearer in prose", "Use a Bearer token in the Authorization header"),
+    ("Bearer shell variable", "Authorization: Bearer $TOKEN"),
+    ("Bearer angle placeholder", "Authorization: Bearer <token>"),
+    ("Bearer template placeholder", "Authorization: Bearer {{ token }}"),
+]
 
 
 def _write(path, text):
@@ -438,7 +548,8 @@ class TestMemoryDiscovery(_MemoryHome):
     def test_no_memory_files_still_gives_an_empty_block(self):
         _memory_dir(self.home).mkdir(parents=True)
 
-        self.assertEqual(self.collect(), {"hash": hashlib.sha256(b"[]").hexdigest(), "folders": []})
+        self.assertEqual(
+            self.collect(), {"hash": EMPTY_BLOCK_HASH, "rules_version": cmh.RULES_VERSION, "folders": []})
 
     def test_the_hash_ignores_last_modified_and_follows_content(self):
         index = _write(_memory_dir(self.home) / "MEMORY.md", "index\n")
@@ -452,6 +563,16 @@ class TestMemoryDiscovery(_MemoryHome):
             touched["folders"][0]["index"]["last_modified"], first["folders"][0]["index"]["last_modified"])
         self.assertEqual(touched["hash"], first["hash"])
         self.assertNotEqual(edited["hash"], first["hash"])
+
+    def test_a_rules_version_bump_changes_the_hash_and_the_block_carries_the_version(self):
+        _write(_memory_dir(self.home) / "MEMORY.md", "index\n")
+        first = self.collect()
+        with patch.object(cmh, "RULES_VERSION", cmh.RULES_VERSION + 1):
+            bumped = self.collect()
+
+        self.assertEqual(first["rules_version"], cmh.RULES_VERSION)
+        self.assertEqual(bumped["rules_version"], cmh.RULES_VERSION + 1)
+        self.assertNotEqual(bumped["hash"], first["hash"])
 
     def test_url_hosts_are_lowercased_deduplicated_and_need_a_dot(self):
         memory = _memory_dir(self.home)
@@ -822,7 +943,7 @@ class TestMemoriesOnTheToolReport(_DrivesMain, unittest.TestCase):
         reports = self.run_scan(self.ENABLED)
 
         self.assertEqual(reports[0]["tools"][0]["memories"]["folders"], [])
-        self.assertEqual(reports[0]["memories_hash"], hashlib.sha256(b"[]").hexdigest())
+        self.assertEqual(reports[0]["memories_hash"], EMPTY_BLOCK_HASH)
 
     def test_a_memory_only_change_uploads_again_under_the_same_tool_hash(self):
         first = self.run_scan(self.ENABLED)
@@ -876,6 +997,25 @@ class TestMemoriesOnTheToolReport(_DrivesMain, unittest.TestCase):
 
         self.assertIn("not_json", logged)
         self.assertNotIn("Hunter2pass", logged)
+
+
+class TestMemorySecretRules(unittest.TestCase):
+    """The shared secret rules, line by line; ai-gateway-data keeps the same file and the same lines."""
+
+    def test_the_rule_file_is_the_one_ai_gateway_data_holds(self):
+        rules_source = Path(memory_secret_rules.__file__).read_bytes().replace(b"\r\n", b"\n")
+
+        self.assertEqual(hashlib.sha256(rules_source).hexdigest(), MEMORY_SECRET_RULES_SHA256)
+
+    def test_lines_with_a_secret_are_flagged(self):
+        for label, line in SHOULD_MASK:
+            with self.subTest(label):
+                self.assertTrue(memory_secret_rules.find_secrets(line))
+
+    def test_ordinary_lines_are_not_flagged(self):
+        for label, line in SHOULD_NOT_MASK:
+            with self.subTest(label):
+                self.assertEqual(memory_secret_rules.find_secrets(line), [])
 
 
 if __name__ == "__main__":

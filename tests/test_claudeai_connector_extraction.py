@@ -610,8 +610,6 @@ class ClaudeAIDesktopSessionRootScanTest(unittest.TestCase):
         for patcher in (
             mock.patch.object(helpers, "_iter_admin_user_homes", return_value=[self.alice, self.bob]),
             mock.patch.object(helpers.Path, "home", return_value=self.root_home),
-            mock.patch.object(helpers.platform, "system", return_value="Darwin"),
-            mock.patch("platform.system", return_value="Darwin"),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)

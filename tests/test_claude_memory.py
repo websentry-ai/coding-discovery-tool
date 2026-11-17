@@ -29,7 +29,7 @@ EMPTY_BLOCK_HASH = hashlib.sha256(
 SLUG = "-work-shop"
 
 # Must equal the same constant in the other repo (coding-discovery-tool / ai-gateway-data).
-MEMORY_SECRET_RULES_SHA256 = "b58025a11695010441ed3853d31ec62c2c71819649afa4761217d74b0a93ac0f"
+MEMORY_SECRET_RULES_SHA256 = "94b26274a10ba901e2046b96279f2b46768def5e3ee46a372b2f2a25640cc7e4"
 
 PRIVATE_KEY_BLOCK = (
     "-----BEGIN RSA PRIVATE KEY-----\n" + "MIIEowIBAAKCAQEA1b2c3d4e5f6g7h8i9j0k1l2m3n4\n" * 3
@@ -79,6 +79,11 @@ SHOULD_MASK = [
     ("Lowercase joined secret key", "secretkey: abc123def456ghi"),
     ("All-digit password", "DB_PASSWORD=20240101"),
     ("Hex key in URL query", "https://api.example.com/x?key=" + "8A3F09B2C4D5E6F708192A3B4C5D6E7F"),
+    ("UUID key in URL query", "https://api.example.com/data?key=" + "6a41c739-57cf-46a9-b53d-cda412bb3d24"),
+    ("Google API key with a hyphen in URL query",
+     "https://maps.googleapis.com/maps/api/geocode/json?key=" + "AIza" + "SyD-3x4mpl3K3y_abcdefghijklmnopqrst"),
+    ("Private key with a short last line", PRIVATE_KEY_BLOCK.replace("-----END", "AB==\n-----END")),
+    ("Encrypted private key", PRIVATE_KEY_BLOCK.replace("RSA", "ENCRYPTED")),
 ]
 
 SHOULD_NOT_MASK = [
@@ -100,6 +105,7 @@ SHOULD_NOT_MASK = [
     ("camelCase name key", "apiKeyName: myservice2"),
     ("Password expiry timestamp", "password_expires_at=1731849600"),
     ("Quoted shell variable", 'password = "$DB_PASSWORD"'),
+    ("Private key placeholder", "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"),
     ("pwd output", "pwd: /Users/dev/repo2"),
     ("pwd home path", "pwd: ~/code/app-v3"),
     ("Password reset URL", "password_reset_url: https://app.example.com/v2/reset"),

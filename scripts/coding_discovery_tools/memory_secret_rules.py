@@ -74,9 +74,10 @@ SECRET_RULES: Tuple[Tuple[str, Pattern, Tuple[Pattern, ...]], ...] = (
     (
         'SECRET-008',
         re.compile(
-            r'-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----\r?\n'
-            r'(?:[A-Za-z0-9+/=]{20,}\r?\n){2,}'
-            r'-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----'
+            r'-----BEGIN (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----\r?\n'
+            r'(?:[A-Za-z-]{1,40}: [^\n]{0,200}\n|\r?\n){0,5}'
+            r'(?:[A-Za-z0-9+/=]{20,}\r?\n)+(?:[A-Za-z0-9+/=]{1,19}\r?\n)?'
+            r'-----END (?:RSA |EC |DSA |OPENSSH |ENCRYPTED )?PRIVATE KEY-----'
         ),
         (),
     ),
@@ -172,7 +173,8 @@ SECRET_RULES: Tuple[Tuple[str, Pattern, Tuple[Pattern, ...]], ...] = (
         'SECRET-023',
         re.compile(
             r'[?&](?:(?:token|access_token|api_key|apikey|sig|signature|secret|password|x-amz-signature'
-            r'|x-goog-signature)=[^&\s#]{8,}|key=(?=[A-Za-z0-9_]{0,200}[0-9])[A-Za-z0-9_]{20,}(?![A-Za-z0-9_-]))',
+            r'|x-goog-signature)=[^&\s#]{8,}|key=(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+            r'|(?=[A-Za-z0-9_]{0,200}[0-9])[A-Za-z0-9_]{20,}(?![A-Za-z0-9_-])))',
             re.IGNORECASE
         ),
         (),

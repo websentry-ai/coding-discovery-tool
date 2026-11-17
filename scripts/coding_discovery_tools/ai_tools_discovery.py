@@ -1418,6 +1418,14 @@ class AIToolsDetector:
                 merged += 1
         return merged
 
+    @staticmethod
+    def _owns_plugins_dir(plugins_dir: Path) -> bool:
+        """False when another user's plugins dir really sits outside that user's home."""
+        owner_home = str(plugins_dir.parent.parent)
+        if os.path.realpath(owner_home) == os.path.realpath(str(Path.home())):
+            return True
+        return owned_boundary(owner_home, plugins_dir) is not None
+
     def _extract_and_merge_tool_skills(
         self,
         tool_name: str,
@@ -2017,12 +2025,13 @@ class AIToolsDetector:
             for plugins_dir in plugins_dirs_to_scan:
                 user_plugins = extract_claude_code_plugins(plugins_dir)
                 plugins.extend(user_plugins)
-                if user_plugins:
+                if user_plugins and self._owns_plugins_dir(plugins_dir):
                     plugin_groups.append((str(plugins_dir.parent.parent), user_plugins))
 
             plugin_lookup = build_plugin_install_path_lookup(plugins) if plugins else {}
             if plugins:
                 tool["plugins"] = plugins
+                tool["_plugins_by_owner"] = plugin_groups
                 logger.info(f"  ✓ Found {len(plugins)} plugin(s)")
             else:
                 logger.info("  ℹ No plugins found")
@@ -2290,6 +2299,21 @@ class AIToolsDetector:
                 filtered_tool['permissions'] = own[0]  # already riskiest-first
             else:
                 filtered_tool.pop('permissions', None)
+
+        plugins_by_owner = filtered_tool.pop('_plugins_by_owner', None)
+        if plugins_by_owner is not None:
+            fold_case = str.lower if self.system == "Windows" else str
+            try:
+                own_plugins = [plugin for owner_home, group in plugins_by_owner
+                               if fold_case(_normalise_path(owner_home)) == fold_case(user_home_norm)
+                               for plugin in group]
+            except (TypeError, ValueError, AttributeError) as e:
+                logger.debug(f"Unreadable plugin owner data, dropping plugins: {e}")
+                own_plugins = []
+            if own_plugins:
+                filtered_tool['plugins'] = own_plugins
+            else:
+                filtered_tool.pop('plugins', None)
 
         if 'permissions' in filtered_tool:
             perms = filtered_tool['permissions']
@@ -3250,12 +3274,13 @@ class AIToolsDetector:
                 for cursor_plugins_dir in cursor_plugins_dirs:
                     user_plugins = extract_cursor_plugins(cursor_plugins_dir)
                     cursor_plugins.extend(user_plugins)
-                    if user_plugins:
+                    if user_plugins and self._owns_plugins_dir(cursor_plugins_dir):
                         cursor_plugin_groups.append((str(cursor_plugins_dir.parent.parent), user_plugins))
 
                 cursor_plugin_lookup = build_plugin_install_path_lookup(cursor_plugins) if cursor_plugins else {}
                 if cursor_plugins:
                     tool["plugins"] = cursor_plugins
+                    tool["_plugins_by_owner"] = cursor_plugin_groups
                     logger.info(f"  ✓ Found {len(cursor_plugins)} Cursor plugin(s)")
                 else:
                     logger.info("  ℹ No Cursor plugins found")
@@ -3579,6 +3604,9 @@ class AIToolsDetector:
         if "plugins" in tool:
             tool_dict["plugins"] = tool["plugins"]
             logger.info(f"  ✓ Added {len(tool['plugins'])} plugin(s) to {tool_name} report")
+
+        if "_plugins_by_owner" in tool:
+            tool_dict["_plugins_by_owner"] = tool["_plugins_by_owner"]
 
         if "_ide_folder" in tool:
             tool_dict["_ide_folder"] = tool["_ide_folder"]

@@ -1418,6 +1418,14 @@ class AIToolsDetector:
                 merged += 1
         return merged
 
+    @staticmethod
+    def _owns_plugins_dir(plugins_dir: Path) -> bool:
+        """False when another user's plugins dir really sits outside that user's home."""
+        owner_home = str(plugins_dir.parent.parent)
+        if os.path.realpath(owner_home) == os.path.realpath(str(Path.home())):
+            return True
+        return owned_boundary(owner_home, plugins_dir) is not None
+
     def _extract_and_merge_tool_skills(
         self,
         tool_name: str,
@@ -2017,7 +2025,7 @@ class AIToolsDetector:
             for plugins_dir in plugins_dirs_to_scan:
                 user_plugins = extract_claude_code_plugins(plugins_dir)
                 plugins.extend(user_plugins)
-                if user_plugins:
+                if user_plugins and self._owns_plugins_dir(plugins_dir):
                     plugin_groups.append((str(plugins_dir.parent.parent), user_plugins))
 
             plugin_lookup = build_plugin_install_path_lookup(plugins) if plugins else {}
@@ -3266,7 +3274,7 @@ class AIToolsDetector:
                 for cursor_plugins_dir in cursor_plugins_dirs:
                     user_plugins = extract_cursor_plugins(cursor_plugins_dir)
                     cursor_plugins.extend(user_plugins)
-                    if user_plugins:
+                    if user_plugins and self._owns_plugins_dir(cursor_plugins_dir):
                         cursor_plugin_groups.append((str(cursor_plugins_dir.parent.parent), user_plugins))
 
                 cursor_plugin_lookup = build_plugin_install_path_lookup(cursor_plugins) if cursor_plugins else {}

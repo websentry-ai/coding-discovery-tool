@@ -207,7 +207,8 @@ class TestClaudeCodePluginSkillsRootScan(_PluginRootScanCase):
         self.assertEqual(_plugin_names(filtered), {"a"})
 
     def test_malformed_owner_data_drops_plugins_without_crashing(self):
-        for bad in (5, [None, 5, ("x",)], [("/home/alice", None)], [(None, [{"plugin_name": "a"}])]):
+        alice_home = str(self.homes["alice"])
+        for bad in (5, [None, 5, ("x",)], [(alice_home, None)], [(5, [{"plugin_name": "a"}])]):
             tool = {"name": "Claude Code", "projects": [], "plugins": [{"plugin_name": "a"}],
                     "_plugins_by_owner": bad}
             filtered = self.detector.filter_tool_projects_by_user(tool, self.homes["alice"])
@@ -270,6 +271,7 @@ class TestClaudeCodePluginSkillsRootScan(_PluginRootScanCase):
         _symlink(self, self.homes["bob"] / ".claude", self.homes["alice"] / ".claude")
         processed = self.detector.process_single_tool({"name": "Claude Code", "install_path": str(self.tmp)})
         self.assert_each_user_keeps_own_skills(processed, {"alice": {"alice-plugin-skill"}, "bob": set()})
+        self.assert_each_user_reports_only_own_plugins(processed, {"alice": {"alice-plugin"}, "bob": set()})
 
 
 class TestCursorPluginSkillsRootScan(_PluginRootScanCase):
@@ -306,6 +308,7 @@ class TestCursorPluginSkillsRootScan(_PluginRootScanCase):
         _symlink(self, bob_plugins, self.homes["alice"] / ".cursor" / "plugins")
         processed = self.detector.process_single_tool({"name": "Cursor", "install_path": str(self.tmp)})
         self.assert_each_user_keeps_own_skills(processed, {"alice": {"alice-plugin-skill"}, "bob": set()})
+        self.assert_each_user_reports_only_own_plugins(processed, {"alice": {"alice-plugin"}, "bob": set()})
 
 
 @unittest.skipUnless(path_containment._CAN_WALK, "component-wise O_NOFOLLOW open needs POSIX dir_fd")

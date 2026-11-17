@@ -1,16 +1,38 @@
-"""Secret patterns checked on the device against Claude Code memory files."""
+"""Secret patterns for Claude Code memory files."""
 import re
 from bisect import bisect_right
 from itertools import accumulate
 from typing import Dict, Iterator, List, Pattern, Tuple
 
-# Mirrors the backend hardcoded_secrets rules: keep in sync, and bump RULES_VERSION on any change.
-RULES_VERSION = 2
+# Kept byte-identical in coding-discovery-tool and ai-gateway-data; bump RULES_VERSION on any change.
+RULES_VERSION = 3
+
+# A quoted value that is a placeholder, a shell variable or a template, not a secret.
+_PLACEHOLDER = (
+    r'(?![<{])(?!\$[({]|\$(?-i:[A-Z_][A-Z0-9_]*)["\'])(?![*xX]+["\'])'
+    r'(?!(?:changeme|password|example|placeholder|redacted)["\'])(?!your[_-][^\'"\s]*["\'])'
+)
+# A key that names a setting about the secret (its name, URL, TTL...) rather than holding it.
+_DESCRIPTOR_KEY = (
+    r'(?![A-Za-z0-9_.-]{0,20}?(?:[_.-]|(?-i:(?<=[a-z0-9])(?=[A-Z])))'
+    r'(?:name|url|uri|arn|path|file|dir|ttl|ttl_ms|expiry|expires|expires_at|age|days|seconds|timeout|limit|attempts|'
+    r'length|count|type|id|hashers?|endpoint|header|policy|prefix|format|version|field|label)["\']?[ \t]*[=:])'
+)
+# A value that is a URL, an ARN or a path under a well-known root rather than secret material.
+_NON_SECRET_VALUE = (
+    r'(?![A-Za-z][A-Za-z0-9+.-]*://|arn:|~/|\./|\.\./|[A-Za-z]:\\'
+    r'|/(?:Users|home|var|etc|tmp|opt|usr|run|mnt|srv|private|app|data)/)'
+)
+# The rest of a key after its keyword, the separator, and the start of a value that can hold a secret.
+_KEY_TAIL = (
+    _DESCRIPTOR_KEY + r's?(?:(?:access)?key)?(?:(?:[_.-]|(?-i:[A-Z0-9]))[A-Za-z0-9_.-]{0,19})?["\']?[ \t]*[=:][ \t]*'
+    r'(?![$<{%*])' + _NON_SECRET_VALUE
+)
 
 SECRET_RULES: Tuple[Tuple[str, Pattern, Tuple[Pattern, ...]], ...] = (
     (
         'SECRET-001',
-        re.compile(r'(?<![A-Z0-9])(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA)[0-9A-Z]{16}(?![A-Z0-9])'),
+        re.compile(r'(?<![A-Z0-9])(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA)(?!X{16})[0-9A-Z]{16}(?![A-Z0-9])'),
         (),
     ),
     (
@@ -20,12 +42,18 @@ SECRET_RULES: Tuple[Tuple[str, Pattern, Tuple[Pattern, ...]], ...] = (
     ),
     (
         'SECRET-003',
-        re.compile(r'(?:sk-(?:proj-|svcacct-)[A-Za-z0-9_-]{40,}|sk-[A-Za-z0-9]{20,}|(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{24,})'),
+        re.compile(
+            r'(?:sk-(?:proj-|svcacct-)[A-Za-z0-9_-]{40,}|sk-[A-Za-z0-9]{20,}'
+            r'|(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{24,})'
+        ),
         (),
     ),
     (
         'SECRET-004',
-        re.compile(r'(?:xox[bpras]-[A-Za-z0-9\-]{24,}|xoxe\.xoxp-[0-9]+-[0-9]+-[0-9]+-[a-f0-9]+|xapp-[0-9]+-[A-Za-z0-9]+-[0-9]+-[A-Za-z0-9]+)'),
+        re.compile(
+            r'(?:xox[bpras]-[A-Za-z0-9\-]{24,}|xoxe\.xoxp-[0-9]+-[0-9]+-[0-9]+-[a-f0-9]+'
+            r'|xapp-[0-9]+-[A-Za-z0-9]+-[0-9]+-[A-Za-z0-9]+)'
+        ),
         (),
     ),
     (
@@ -91,9 +119,10 @@ SECRET_RULES: Tuple[Tuple[str, Pattern, Tuple[Pattern, ...]], ...] = (
         'SECRET-016',
         re.compile(
             r'(?:'
-            r'(?:password|passwd|pwd)["\']?\s*[=:]\s*["\'][^\'"\s]{8,}["\']'
-            r'|(?:api[_-]?key|apikey)["\']?\s*[=:]\s*["\'][^\'"\s]{16,}["\']'
-            r'|(?:secret|token|auth[_-]?token|access[_-]?token)["\']?\s*[=:]\s*["\'][^\'"\s]{16,}["\']'
+            r'(?:password|passwd|pwd)["\']?\s*[=:]\s*["\']' + _PLACEHOLDER + r'[^\'"\s]{8,}["\']'
+            r'|(?:api[_-]?key|apikey)["\']?\s*[=:]\s*["\']' + _PLACEHOLDER + r'[^\'"\s]{16,}["\']'
+            r'|(?:secret|token|auth[_-]?token|access[_-]?token)["\']?\s*[=:]\s*["\']' + _PLACEHOLDER
+            + r'[^\'"\s]{16,}["\']'
             r')',
             re.IGNORECASE
         ),
@@ -125,8 +154,10 @@ SECRET_RULES: Tuple[Tuple[str, Pattern, Tuple[Pattern, ...]], ...] = (
     (
         'SECRET-021',
         re.compile(
-            r'(?:password|passwd|pwd|passphrase|secret|token|api_key|apikey)[A-Za-z0-9_.-]{0,20}["\']?[ \t]*[=:][ \t]*'
-            r'(?![$<{%*])(?=[^\s\'"]{0,200}[0-9])(?!(?:none|null|true|false|required|optional|string|changeme)(?![^\s\'"])|xxx)'
+            r'(?:(?:password|passwd|pwd|passphrase)' + _KEY_TAIL
+            + r'|(?:secret|token|api_key|apikey)' + _KEY_TAIL + r'(?=[^\s\'"]{0,200}[A-Za-z]))'
+            r'(?=[^\s\'"]{0,200}[0-9])'
+            r'(?!(?:none|null|true|false|required|optional|string|changeme)(?![^\s\'"])|xxx)'
             r'[^\s\'"]{8,}',
             re.IGNORECASE
         ),
@@ -134,16 +165,21 @@ SECRET_RULES: Tuple[Tuple[str, Pattern, Tuple[Pattern, ...]], ...] = (
     ),
     (
         'SECRET-022',
-        re.compile(r'(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]{0,30}://[^\s:@/]*:[^\s/@]+@'),
+        re.compile(r'(?<=://)[^\s:@/]*:[^\s/@]+@'),
         (),
     ),
     (
         'SECRET-023',
         re.compile(
-            r'[?&](?:token|access_token|api_key|apikey|key|sig|signature|secret|password|x-amz-signature|x-goog-signature)'
-            r'=[^&\s#]{8,}',
+            r'[?&](?:(?:token|access_token|api_key|apikey|sig|signature|secret|password|x-amz-signature'
+            r'|x-goog-signature)=[^&\s#]{8,}|key=(?=[A-Za-z0-9_]{0,200}[0-9])[A-Za-z0-9_]{20,}(?![A-Za-z0-9_-]))',
             re.IGNORECASE
         ),
+        (),
+    ),
+    (
+        'SECRET-024',
+        re.compile(r'\b(?i:bearer)[ \t]+(?=[A-Za-z0-9._~+/=-]{0,200}[0-9])[A-Za-z0-9._~+/=-]{20,}'),
         (),
     ),
 )

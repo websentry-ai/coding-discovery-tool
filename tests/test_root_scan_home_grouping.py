@@ -202,9 +202,14 @@ class TestClaudeCodePluginSkillsRootScan(_PluginRootScanCase):
         tool = {"name": "Claude Code", "projects": [],
                 "plugins": [{"plugin_name": "a"}, {"plugin_name": "b"}],
                 "_plugins_by_owner": [("C:\\Users\\Alice\\", [{"plugin_name": "a"}]),
-                                      ("c:/users/al", [{"plugin_name": "b"}])]}
+                                      ("c:/users/al", [{"plugin_name": "b"}])],
+                "permissions": {"settings_source": "user", "settings_path": "C:\\Users\\Alice\\.claude\\settings.json"}}
         filtered = windows.filter_tool_projects_by_user(tool, Path("c:/users/alice"))
         self.assertEqual(_plugin_names(filtered), {"a"})
+        self.assertIn("permissions", filtered)
+        self.assertNotIn("permissions", windows.filter_tool_projects_by_user(tool, Path("c:/users/al")))
+        pathless = {**tool, "permissions": {"settings_source": "user", "settings_path": None}}
+        self.assertIn("permissions", windows.filter_tool_projects_by_user(pathless, Path("c:/users/alice")))
 
     def test_malformed_owner_data_drops_plugins_without_crashing(self):
         alice_home = str(self.homes["alice"])

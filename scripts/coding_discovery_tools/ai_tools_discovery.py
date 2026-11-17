@@ -1464,7 +1464,9 @@ class AIToolsDetector:
         connector_projects: List[Dict] = []
         try:
             extract_claudeai_mcp_servers_with_root_support(
-                connector_projects, home_filter=claude_cli_and_desktop_share_account
+                connector_projects,
+                home_filter=claude_cli_and_desktop_share_account,
+                include_desktop_sessions=True,
             )
             self._merge_mcp_configs_into_projects(connector_projects, projects_dict)
         except Exception as e:

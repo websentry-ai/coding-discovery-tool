@@ -21,7 +21,7 @@ _DESCRIPTOR_KEY = (
 # A value that is a URL, an ARN or a path under a well-known root rather than secret material.
 _NON_SECRET_VALUE = (
     r'(?![A-Za-z][A-Za-z0-9+.-]*://|arn:|~/|\./|\.\./|[A-Za-z]:\\'
-    r'|/(?:Users|home|var|etc|tmp|opt|usr|run|mnt|srv|private|app|data)/)'
+    r'|/(?:Users|home|root|var|etc|tmp|opt|usr|run|mnt|srv|private|app|data|Volumes|workspaces?)/)'
 )
 # The rest of a key after its keyword, the separator, and the start of a value that can hold a secret.
 _KEY_TAIL = (
@@ -156,7 +156,7 @@ SECRET_RULES: Tuple[Tuple[str, Pattern, Tuple[Pattern, ...]], ...] = (
         'SECRET-021',
         re.compile(
             r'(?:(?:password|passwd|pwd|passphrase)' + _KEY_TAIL
-            + r'|(?:secret|token|api_key|apikey)' + _KEY_TAIL + r'(?=[^\s\'"]{0,200}[A-Za-z]))'
+            + r'|(?:secret|token|api_key|apikey)' + _KEY_TAIL + r'(?=[^\s\'"]{0,200}[A-Za-z]|[^\s\'"]{20,}))'
             r'(?=[^\s\'"]{0,200}[0-9])'
             r'(?!(?:none|null|true|false|required|optional|string|changeme)(?![^\s\'"])|xxx)'
             r'[^\s\'"]{8,}',
@@ -174,7 +174,9 @@ SECRET_RULES: Tuple[Tuple[str, Pattern, Tuple[Pattern, ...]], ...] = (
         re.compile(
             r'[?&](?:(?:token|access_token|api_key|apikey|sig|signature|secret|password|x-amz-signature'
             r'|x-goog-signature)=[^&\s#]{8,}|key=(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
-            r'|(?=[A-Za-z0-9_]{0,200}[0-9])[A-Za-z0-9_]{20,}(?![A-Za-z0-9_-])))',
+            r'|(?=[A-Za-z0-9_]{0,200}[0-9])[A-Za-z0-9_]{20,}(?![A-Za-z0-9_-])'
+            r'|(?-i:(?=[A-Za-z0-9_-]{0,200}[0-9])(?=[A-Za-z0-9_-]{0,200}[a-z])(?=[A-Za-z0-9_-]{0,200}[A-Z]))'
+            r'[A-Za-z0-9_-]{24,}(?![A-Za-z0-9_-])))',
             re.IGNORECASE
         ),
         (),

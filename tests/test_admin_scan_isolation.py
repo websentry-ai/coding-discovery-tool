@@ -324,6 +324,8 @@ def scan_as(machine: FakeMachine, scanner=None):
             stack.enter_context(mock.patch.object(os, "getuid", return_value=0 if is_root else 501))
             stack.enter_context(mock.patch.object(os, "geteuid", return_value=0 if is_root else 501))
         patch_everywhere(stack, "_windows_process_is_elevated", lambda: is_root)
+        # Spotlight sees this machine's apps and is missing off macOS; report a search that found nothing.
+        patch_everywhere(stack, "spotlight_claude_bundles", lambda *args, **kwargs: ([], True))
         # MDM plist preferences are read with `defaults`, which would see this machine's.
         stack.enter_context(mock.patch(f"{PACKAGE}.macos.claude_code.settings_extractor."
                                        "MacOSClaudeSettingsExtractor._extract_plist_settings", return_value=[]))

@@ -33,13 +33,14 @@ def _write_json(path: Path, payload) -> Path:
     return path
 
 
-def _write_session(session_dir: Path, name: str, connectors, mtime: float) -> Path:
+def _write_session(session_dir: Path, name: str, connectors, mtime: float, last_activity=None) -> Path:
     """Write one desktop session file carrying `remoteMcpServersConfig`."""
     session_dir.mkdir(parents=True, exist_ok=True)
     path = session_dir / name
     path.write_text(json.dumps({
         "sessionId": name,
         "remoteMcpServersConfig": connectors,
+        **({} if last_activity is None else {"lastActivityAt": last_activity}),
     }), encoding="utf-8")
     os.utime(path, (mtime, mtime))
     return path
@@ -669,6 +670,280 @@ class ClaudeAIDesktopSessionRootScanTest(unittest.TestCase):
         os.mkfifo(org / "local_x.json")
         self._sessions(self.bob, ["Notion"])
         self.assertEqual(self._scan(), {"bob": ["claude.ai Notion"]})
+
+
+STALE = ["claude.ai Gmail", "claude.ai Vercel", "claude.ai Linear"]
+
+
+def _sign_in_cli(home: Path, names, account="acct-1", org="org-1"):
+    oauth = {"accountUuid": account, **({"organizationUuid": org} if org else {})}
+    _write_json(home / ".claude.json", {"claudeAiMcpEverConnected": names, "oauthAccount": oauth})
+
+
+class ClaudeAISameOrgSessionConnectorsTest(unittest.TestCase):
+    """When CLI and desktop share an account, the CLI org's recent session files decide the list."""
+
+    setUp = ClaudeAIDesktopSessionConnectorsTest.setUp
+    _session = ClaudeAIDesktopSessionConnectorsTest._session
+    _desktop_account = ClaudeAIDesktopSessionConnectorsTest._desktop_account
+    _names = ClaudeAIDesktopSessionConnectorsTest._names
+    _both_surfaces = ClaudeAIDesktopSessionConnectorsTest._both_surfaces
+
+    def _signed_in(self, org="org-1"):
+        _sign_in_cli(self.home, STALE, org=org)
+        self._desktop_account()
+
+    def test_stale_cli_names_are_dropped(self):
+        self._signed_in()
+        self._session([_connector("Linear"), _connector("Notion"), VISUALIZE])
+        expected = ["claude.ai Linear", "claude.ai Notion"]
+        self.assertEqual(self._both_surfaces(), (expected, expected))
+
+    def test_other_org_newest_file_is_ignored(self):
+        self._signed_in()
+        self._session([_connector("Linear"), _connector("Slack")], age_days=2)
+        _write_session(self.app_dir / "claude-code-sessions" / "acct-1" / "org-2", "local_b.json",
+                       [_connector("Claude Docs"), _connector("Extra")], self.now - 60)
+        self.assertEqual(self._names("Claude Cowork"), ["claude.ai Linear", "claude.ai Slack"])
+
+    def test_one_short_file_among_several_hides_nothing(self):
+        self._signed_in()
+        for index in range(3):
+            self._session([_connector("Linear"), _connector("Slack")], age_days=2 + index, name=f"local_{index}.json")
+        self._session([_connector("Slack")], age_days=1, name="local_new.json", sub="claude-code-sessions")
+        self.assertEqual(sorted(self._names("Claude Desktop")), ["claude.ai Linear", "claude.ai Slack"])
+
+    def test_listing_kept_for_22_days_and_dropped_after_31(self):
+        self._signed_in()
+        self._session([_connector("Linear")], age_days=1, name="local_new.json")
+        self._session([_connector("Gmail")], age_days=22, name="local_22.json")
+        self._session([_connector("Vercel")], age_days=31, name="local_31.json")
+        self.assertEqual(self._names("Claude Cowork"), ["claude.ai Linear", "claude.ai Gmail"])
+
+    def test_org_folder_match_ignores_case(self):
+        self._signed_in(org="ORG-1")
+        self._session([_connector("Linear")])
+        self.assertEqual(self._names("Claude Cowork"), ["claude.ai Linear"])
+
+    def test_tools_come_from_the_newest_listing_that_has_them(self):
+        self._signed_in()
+        self._session([_connector("Slack")], age_days=1, name="local_new.json")
+        self._session([_connector("Slack", tools=SLACK_TOOLS)], age_days=3, name="local_old.json")
+        servers = [s for p in self.detector.process_single_tool({"name": "Claude Cowork"})["projects"]
+                   for s in p["mcpServers"]]
+        self.assertEqual([s["scan"]["tools"] for s in servers], [[{"name": "send_message", "description": "Send."}]])
+
+    def test_newest_listing_supplies_the_tools(self):
+        self._signed_in()
+        self._session([_connector("Slack", tools=SLACK_TOOLS)], age_days=1, name="local_new.json")
+        self._session([_connector("Slack", tools=[{"name": "old"}])], age_days=3, name="local_old.json")
+        servers = [s for p in self.detector.process_single_tool({"name": "Claude Cowork"})["projects"]
+                   for s in p["mcpServers"]]
+        self.assertEqual([s["scan"]["tools"] for s in servers], [[{"name": "send_message", "description": "Send."}]])
+
+    def test_resaved_old_session_is_dated_by_its_last_activity(self):
+        self._signed_in()
+        self._session([_connector("Linear")], age_days=2)
+        org_dir = self.app_dir / "claude-code-sessions" / "acct-1" / "org-1"
+        _write_session(org_dir, "local_old.json", [_connector("Gmail")], self.now - 86400,
+                       last_activity=(self.now - 40 * 86400) * 1000)
+        self.assertEqual(self._names("Claude Cowork"), ["claude.ai Linear"])
+
+    def test_latest_used_session_supplies_the_tools(self):
+        self._signed_in()
+        org_dir = self.app_dir / "claude-code-sessions" / "acct-1" / "org-1"
+        _write_session(org_dir, "local_used.json", [_connector("Slack", tools=SLACK_TOOLS)], self.now - 3 * 86400,
+                       last_activity=(self.now - 3 * 86400) * 1000)
+        _write_session(org_dir, "local_resaved.json", [_connector("Slack", tools=[{"name": "old"}])],
+                       self.now - 86400, last_activity=(self.now - 9 * 86400) * 1000)
+        servers = [s for p in self.detector.process_single_tool({"name": "Claude Cowork"})["projects"]
+                   for s in p["mcpServers"]]
+        self.assertEqual([s["scan"]["tools"] for s in servers], [[{"name": "send_message", "description": "Send."}]])
+
+    def test_more_files_than_can_be_read_leaves_todays_list(self):
+        self._signed_in()
+        org_dir = self.app_dir / "claude-code-sessions" / "acct-1" / "org-1"
+        _write_session(org_dir, "local_latest.json", [_connector("Notion")], self.now - 86400)
+        for index in range(2):
+            _write_session(org_dir, f"local_resaved_{index}.json", [_connector("Slack")], self.now - 3600 - index)
+        with mock.patch.object(helpers, "_SESSION_MAX_FILES_READ", 2):
+            self.assertEqual(self._names("Claude Cowork"), STALE + ["claude.ai Slack"])
+
+    def test_unreadable_session_among_readable_ones_leaves_todays_list(self):
+        unreadable = {"oversize": json.dumps({"remoteMcpServersConfig": [], "pad": "x" * (6 * 1024 * 1024)}),
+                      "cut off": '{"remoteMcpServersConfig": [{"na'}
+        for label, content in unreadable.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as fresh:
+                self.home, self.app_dir = Path(fresh), helpers._claude_app_support_dir(Path(fresh))
+                with mock.patch.object(Path, "home", return_value=self.home):
+                    self._signed_in()
+                    self._session([_connector("Slack")], age_days=5)
+                    newest = self._session([_connector("Notion")], age_days=0, name="local_newest.json")
+                    newest.write_text(content, encoding="utf-8")
+                    self.assertEqual(self._names("Claude Cowork"), STALE + ["claude.ai Slack"])
+
+    def test_unlistable_session_folder_leaves_todays_list(self):
+        self._signed_in()
+        self._session([_connector("Slack")], age_days=5)
+        locked = self.app_dir / "claude-code-sessions" / "acct-1" / "org-1"
+        _write_session(locked, "local_newest.json", [_connector("Notion")], self.now - 3600)
+        real_scandir = os.scandir
+
+        def scandir(target):
+            if Path(target) == locked:
+                raise PermissionError("locked")
+            return real_scandir(target)
+        with mock.patch.object(os, "scandir", scandir):
+            self.assertEqual(self._names("Claude Cowork"), STALE + ["claude.ai Slack"])
+
+    def test_unusable_last_activity_falls_back_to_file_time(self):
+        self._signed_in()
+        org_dir = self.app_dir / "claude-code-sessions" / "acct-1" / "org-1"
+        for index, junk in enumerate(("soon", True, -5, float("inf"))):
+            _write_session(org_dir, f"local_{index}.json", [_connector(f"C{index}")], self.now - 86400 - index,
+                           last_activity=junk)
+        self.assertEqual(self._names("Claude Cowork"), [f"claude.ai C{index}" for index in range(4)])
+
+    def test_every_fallback_matches_todays_output(self):
+        def cli_desktop_mismatch():
+            _sign_in_cli(self.home, STALE, account="acct-other")
+            self._desktop_account()
+            self._session([_connector("Slack")])
+
+        def org_missing():
+            self._signed_in(org=None)
+            self._session([_connector("Slack")])
+
+        def account_folder_absent():
+            self._signed_in()
+            self._session([_connector("Slack")], account="acct-old")
+
+        cases = {
+            "no cli": lambda: (self._desktop_account(), self._session([_connector("Slack")])),
+            "account mismatch": cli_desktop_mismatch,
+            "cli org missing": org_missing,
+            "no same-org file": lambda: (self._signed_in(), _write_session(
+                self.app_dir / "claude-code-sessions" / "acct-1" / "org-2", "local_b.json",
+                [_connector("Slack")], self.now - 60)),
+            "older than window": lambda: (self._signed_in(), self._session([_connector("Slack")], age_days=31)),
+            "account folder absent": account_folder_absent,
+            "empty list": lambda: (self._signed_in(), self._session([])),
+            "built-ins only": lambda: (self._signed_in(), self._session([VISUALIZE])),
+            "malformed file": lambda: (self._signed_in(), self._session(None), (
+                self.app_dir / "local-agent-mode-sessions" / "acct-1" / "org-1" / "local_a.json"
+            ).write_text('{"remoteMcpServersConfig": [{"na', encoding="utf-8")),
+        }
+        for label, build in cases.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as fresh:
+                self.home, self.app_dir = Path(fresh), helpers._claude_app_support_dir(Path(fresh))
+                with mock.patch.object(Path, "home", return_value=self.home):
+                    build()
+                    rule_b = [self.detector.process_single_tool({"name": t})
+                              for t in ("Claude Cowork", "Claude Desktop")]
+                    with mock.patch.object(helpers, "replace_with_same_org_desktop_session_connectors",
+                                           return_value=False):
+                        today = [self.detector.process_single_tool({"name": t})
+                                 for t in ("Claude Cowork", "Claude Desktop")]
+                self.assertEqual(rule_b, today)
+                self.assertTrue(all(row["projects"] for row in today))
+
+    def test_large_cli_config_still_names_the_org(self):
+        self._signed_in()
+        config = json.loads((self.home / ".claude.json").read_text(encoding="utf-8"))
+        _write_json(self.home / ".claude.json", {**config, "projects": "x" * (6 * 1024 * 1024)})
+        self._session([_connector("Linear")])
+        self.assertEqual(self._names("Claude Cowork"), ["claude.ai Linear"])
+
+    def test_read_error_falls_back_to_todays_output(self):
+        self._signed_in()
+        self._session([_connector("Slack")])
+        with mock.patch.object(helpers, "_same_org_desktop_session_servers", side_effect=OSError("boom")):
+            self.assertEqual(self._names("Claude Cowork"),
+                             ["claude.ai Gmail", "claude.ai Vercel", "claude.ai Linear", "claude.ai Slack"])
+
+    def test_claude_code_row_is_unchanged(self):
+        self._signed_in()
+        self._session([_connector("Linear")])
+        projects = []
+        helpers.extract_claudeai_mcp_servers_with_root_support(projects)
+        self.assertEqual([s["name"] for p in projects for s in p["mcpServers"]], STALE)
+
+    def test_entry_has_exactly_the_keys_of_a_cli_entry_and_nothing_private(self):
+        _sign_in_cli(self.home, ["claude.ai Slack"])
+        cli_projects = []
+        helpers.extract_claudeai_mcp_servers(self.home / ".claude", cli_projects)
+        self._desktop_account()
+        self._session([_connector("Slack", tools=SLACK_TOOLS), _connector("NoTools")])
+        result = self.detector.process_single_tool({"name": "Claude Cowork"})
+        servers = {s["name"]: s for p in result["projects"] for s in p["mcpServers"]}
+        self.assertEqual(set(servers["claude.ai Slack"]), {"name", "scope", "scan"})
+        self.assertEqual(servers["claude.ai NoTools"], {"name": "claude.ai NoTools", "scope": "claudeai"})
+        self.assertEqual(set(servers["claude.ai Slack"]["scan"]),
+                         {"scanned_at", "tools", "tool_count", "server_info", "error"})
+        rendered = json.dumps(result)
+        for private in ("SECRET-INSTRUCTIONS", "uuid-Slack", "mcp.example.com", "vendor", "acct-1", "org-1"):
+            self.assertNotIn(private, rendered)
+
+
+class ClaudeAISameOrgRootScanTest(unittest.TestCase):
+    """A contained scan reads only the user's own CLI-org files."""
+
+    setUp = ClaudeAIDesktopSessionRootScanTest.setUp
+
+    def _scan(self):
+        projects = []
+        helpers.extract_claudeai_mcp_servers_with_root_support(
+            projects, home_filter=helpers.claude_cli_and_desktop_share_account, include_desktop_sessions=True)
+        return {Path(p["path"]).parent.name: [s["name"] for s in p["mcpServers"]] for p in projects}
+
+    def _alice_signed_in(self, names=STALE):
+        _sign_in_cli(self.alice, names, account="a", org="o")
+        _write_json(helpers._claude_app_support_dir(self.alice) / "config.json", {"lastKnownAccountUuid": "a"})
+        org = helpers._claude_app_support_dir(self.alice) / "claude-code-sessions" / "a" / "o"
+        _write_session(org, "local_mine.json", [_connector("Mine")], self.now - 3600)
+        return org
+
+    def test_each_user_gets_their_own_org_list(self):
+        self._alice_signed_in()
+        self.assertEqual(self._scan(), {"alice": ["claude.ai Mine"]})
+
+    def test_symlinked_session_file_into_another_home_is_refused(self):
+        org = self._alice_signed_in()
+        bob_file = _write_session(helpers._claude_app_support_dir(self.bob) / "x", "local_x.json",
+                                  [_connector("BobSecret")], self.now - 60)
+        try:
+            os.symlink(bob_file, org / "local_x.json")
+        except (OSError, NotImplementedError):
+            self.skipTest("cannot create symlinks here")
+        self.assertEqual(self._scan(), {"alice": STALE + ["claude.ai Mine"]})
+
+    def test_redirected_session_folder_leaves_todays_list(self):
+        self._alice_signed_in()
+        elsewhere = self.bob / "sessions"
+        _write_session(elsewhere / "a" / "o", "local_b.json", [_connector("BobSecret")], self.now - 60)
+        try:
+            os.symlink(elsewhere, helpers._claude_app_support_dir(self.alice) / "local-agent-mode-sessions")
+        except (OSError, NotImplementedError):
+            self.skipTest("cannot create symlinks here")
+        self.assertEqual(self._scan(), {"alice": STALE + ["claude.ai Mine"]})
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs FIFO support")
+    def test_planted_fifo_does_not_hang_the_scan(self):
+        org = self._alice_signed_in()
+        os.mkfifo(org / "local_fifo.json")
+        self.assertEqual(self._scan(), {"alice": ["claude.ai Mine"]})
+
+    def test_symlinked_cli_config_falls_back_to_todays_output(self):
+        self._alice_signed_in()
+        real_config = self.bob / "alice-config.json"
+        (self.alice / ".claude.json").rename(real_config)
+        try:
+            os.symlink(real_config, self.alice / ".claude.json")
+        except (OSError, NotImplementedError):
+            self.skipTest("cannot create symlinks here")
+        with mock.patch.object(helpers, "replace_with_same_org_desktop_session_connectors", return_value=False):
+            today = self._scan()
+        self.assertEqual(self._scan(), today)
 
 
 if __name__ == "__main__":

@@ -2945,15 +2945,18 @@ def _read_bounded_json(file: Path, boundary_real: Optional[str], max_bytes: int 
         return None
 
 
-def _child_dirs(parent: Path) -> List[Path]:
+def _child_dirs(parent: Path, strict: bool = False) -> List[Path]:
+    """Sub-folders of `parent`; `strict` raises when it exists but cannot be listed."""
     try:
         with os.scandir(parent) as entries:
             return [Path(entry.path) for entry in entries if entry.is_dir()]
-    except OSError:
+    except OSError as e:
+        if strict and not isinstance(e, FileNotFoundError):
+            raise
         return []
 
 
-def _session_files_under(org_dir: Path) -> List[Tuple[float, Path]]:
+def _session_files_under(org_dir: Path, strict: bool = False) -> List[Tuple[float, Path]]:
     found: List[Tuple[float, Path]] = []
     try:
         with os.scandir(org_dir) as entries:
@@ -2961,7 +2964,8 @@ def _session_files_under(org_dir: Path) -> List[Tuple[float, Path]]:
                 if entry.name.startswith("local_") and entry.name.endswith(".json") and entry.is_file():
                     found.append((entry.stat().st_mtime, Path(entry.path)))
     except OSError:
-        pass
+        if strict:
+            raise
     return found
 
 
@@ -3125,12 +3129,15 @@ def _same_org_desktop_session_servers(home: Path) -> List[Dict[str, Any]]:
             from .path_containment import owned_boundary
             boundary_real = owned_boundary(home, sessions_dir)
             if boundary_real is None:
-                continue
+                return []
+        # strict: a folder that cannot be listed raises, and the caller then leaves today's list.
         candidates.extend(
             (mtime, file, boundary_real)
-            for account_dir in _child_dirs(sessions_dir) if account_dir.name.casefold() == account.casefold()
-            for org_dir in _child_dirs(account_dir) if org_dir.name.casefold() == org.casefold()
-            for mtime, file in _session_files_under(org_dir)
+            for account_dir in _child_dirs(sessions_dir, strict=True)
+            if account_dir.name.casefold() == account.casefold()
+            for org_dir in _child_dirs(account_dir, strict=True)
+            if org_dir.name.casefold() == org.casefold()
+            for mtime, file in _session_files_under(org_dir, strict=True)
             if mtime >= cutoff
         )
 

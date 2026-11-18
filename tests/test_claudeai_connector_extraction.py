@@ -792,6 +792,20 @@ class ClaudeAISameOrgSessionConnectorsTest(unittest.TestCase):
                     newest.write_text(content, encoding="utf-8")
                     self.assertEqual(self._names("Claude Cowork"), STALE + ["claude.ai Slack"])
 
+    def test_unlistable_session_folder_leaves_todays_list(self):
+        self._signed_in()
+        self._session([_connector("Slack")], age_days=5)
+        locked = self.app_dir / "claude-code-sessions" / "acct-1" / "org-1"
+        _write_session(locked, "local_newest.json", [_connector("Notion")], self.now - 3600)
+        real_scandir = os.scandir
+
+        def scandir(target):
+            if Path(target) == locked:
+                raise PermissionError("locked")
+            return real_scandir(target)
+        with mock.patch.object(os, "scandir", scandir):
+            self.assertEqual(self._names("Claude Cowork"), STALE + ["claude.ai Slack"])
+
     def test_cap_keeps_the_latest_used_sessions_not_the_latest_saved(self):
         self._signed_in()
         org_dir = self.app_dir / "claude-code-sessions" / "acct-1" / "org-1"
@@ -920,6 +934,16 @@ class ClaudeAISameOrgRootScanTest(unittest.TestCase):
                                   [_connector("BobSecret")], self.now - 60)
         try:
             os.symlink(bob_file, org / "local_x.json")
+        except (OSError, NotImplementedError):
+            self.skipTest("cannot create symlinks here")
+        self.assertEqual(self._scan(), {"alice": STALE + ["claude.ai Mine"]})
+
+    def test_redirected_session_folder_leaves_todays_list(self):
+        self._alice_signed_in()
+        elsewhere = self.bob / "sessions"
+        _write_session(elsewhere / "a" / "o", "local_b.json", [_connector("BobSecret")], self.now - 60)
+        try:
+            os.symlink(elsewhere, helpers._claude_app_support_dir(self.alice) / "local-agent-mode-sessions")
         except (OSError, NotImplementedError):
             self.skipTest("cannot create symlinks here")
         self.assertEqual(self._scan(), {"alice": STALE + ["claude.ai Mine"]})

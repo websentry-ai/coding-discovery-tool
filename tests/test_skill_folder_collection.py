@@ -4,6 +4,7 @@ import base64
 import hashlib
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -167,6 +168,19 @@ class TestLimits(SkillFolderTestCase):
         self.write("top.py", "x")
         self.assertEqual([f["path"] for f in self.collect()], ["top.py"])
 
+    def test_a_huge_file_is_listed_quickly_without_being_read_whole(self):
+        huge = self.skill / "data" / "dump.bin"
+        huge.parent.mkdir()
+        with open(huge, "wb") as handle:  # sparse where the filesystem allows
+            handle.seek(1024 ** 3 - 1)
+            handle.write(b"\0")
+        started = time.monotonic()
+        f = self.collect()[0]
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertEqual(f["size"], 1024 ** 3)
+        self.assertNotIn("sha256", f)
+        self.assertTrue(f["binary"])
+
     def test_big_file_is_listed_without_a_hash(self):
         with patch.object(sf, "MAX_HASHED_FILE_SIZE", 100):
             self.write("big.bin", b"\x00" * 200)
@@ -225,6 +239,37 @@ class TestContainment(SkillFolderTestCase):
 
     def test_too_broad_a_folder_is_not_walked(self):
         self.assertIsNone(sf.collect_skill_files(Path("/SKILL.md")))
+
+    def test_a_skill_folder_linked_to_a_home_is_not_walked(self):
+        # Linked by mistake or on purpose, it would upload that home's files (~/.aws, ~/.ssh, ...).
+        (self.home / "SKILL.md").write_text("not really a skill")
+        (self.home / ".aws").mkdir()
+        (self.home / ".aws" / "credentials").write_text("[default]\naws_secret_access_key=FAKE\n")
+        link = self.home / ".claude" / "skills" / "linked-home"
+        os.symlink(self.home, link)
+        with patch.object(sf.Path, "home", return_value=self.home):
+            self.assertIsNone(sf.collect_skill_files(link / "SKILL.md"))
+
+    def test_a_folder_holding_users_homes_is_not_walked(self):
+        for homes in ("/Users", "/home"):
+            with self.subTest(homes=homes):
+                self.assertTrue(sf._is_home_or_above(Path(homes)))
+                self.assertTrue(sf._is_home_or_above(Path(homes) / "someone"))
+                self.assertFalse(sf._is_home_or_above(Path(homes) / "someone" / "skills" / "deploy"))
+
+    def test_an_unreadable_file_is_listed_by_name_only(self):
+        locked = self.write("scripts/locked.sh", "echo secret\n")
+        self.write("scripts/open.sh", "echo ok\n")
+        os.chmod(locked, 0)
+        try:
+            if os.access(locked, os.R_OK):
+                self.skipTest("running as root, which can read any file")
+            files = self.by_path(self.collect())
+        finally:
+            os.chmod(locked, 0o644)
+        self.assertNotIn("content", files["scripts/locked.sh"])
+        self.assertTrue(files["scripts/locked.sh"]["truncated"])
+        self.assertEqual(files["scripts/open.sh"]["content"], "echo ok\n")
 
     def test_fifo_is_not_listed(self):
         os.mkfifo(self.skill / "pipe")

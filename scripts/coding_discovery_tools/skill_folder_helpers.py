@@ -65,13 +65,36 @@ def file_priority(path: str) -> int:
     return 3
 
 
+def _homes_parents() -> List[Path]:
+    """Folders that hold users' homes, on every OS this runs on."""
+    parents = [Path("/Users"), Path("/home")]
+    drive = os.environ.get("SystemDrive")
+    if drive:
+        parents.append(Path(drive + "\\") / "Users")
+    return parents
+
+
+def _is_home_or_above(root: Path) -> bool:
+    """True for a user's home, a folder holding one, or a top-level folder under /Users, /home or C:\\Users."""
+    try:
+        home = Path(os.path.realpath(str(Path.home())))
+    except (OSError, RuntimeError, ValueError):
+        home = None
+    if home is not None and (root == home or root in home.parents):
+        return True
+    if root in (Path("/root"), Path("/var/root"), Path("/private/var/root")):
+        return True
+    return any(root.parent == parent or root == parent for parent in _homes_parents())
+
+
 def _skill_root(skill_md: Path) -> Optional[Path]:
-    """The real folder of a SKILL.md, or None when it is too broad to walk (a drive or a home's parent)."""
+    """The real folder of a SKILL.md, or None when it is too broad to walk (a drive, or a user's home or above)."""
     try:
         root = Path(os.path.realpath(str(skill_md.parent)))
     except (OSError, ValueError):
         return None
-    if root == Path(root.anchor) or len(root.parts) < 3 or not root.is_dir():
+    # A skill folder linked to a home would upload that home's files, so it is never walked.
+    if root == Path(root.anchor) or len(root.parts) < 3 or _is_home_or_above(root) or not root.is_dir():
         return None
     return root
 

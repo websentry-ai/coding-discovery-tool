@@ -7,15 +7,9 @@ from typing import Dict, Iterator, List, Pattern, Tuple
 # Kept byte-identical in coding-discovery-tool and ai-gateway-data; bump RULES_VERSION on any change.
 RULES_VERSION = 4
 
-# A URL that can carry a secret: a query string with a digit in it, or a 16-character run mixing letters and digits.
-_URL_WITH_TOKEN = (
-    r'(?:[^\'"\s?]{0,2000}\?[^\'"\s]{0,2000}[0-9]'
-    r'|[^\'"\s]{0,2000}(?=[A-Za-z_-]{0,15}[0-9])(?=[0-9_-]{0,15}[A-Za-z])[A-Za-z0-9_-]{16})'
-)
-# A quoted value that is a placeholder, a shell variable, a template or a plain URL, not a secret.
+# A quoted value that is a placeholder, a shell variable or a template, not a secret.
 _PLACEHOLDER = (
     r'(?![<{])(?!\$[({]|\$(?-i:[A-Z_][A-Z0-9_]*)["\'])(?![*xX]+["\'])'
-    r'(?![A-Za-z][A-Za-z0-9+.-]{0,30}://(?!' + _URL_WITH_TOKEN + r')[^\'"\s]{0,2000}["\'])'
     r'(?!(?:changeme|password|example|placeholder|redacted)["\'])(?!your[_-][^\'"\s]*["\'])'
 )
 # A host on the same machine: a loopback address, the Docker host, or a bare name such as a compose service.

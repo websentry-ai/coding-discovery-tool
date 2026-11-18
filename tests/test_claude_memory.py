@@ -8,7 +8,6 @@ import shutil
 import sys
 import tempfile
 import threading
-import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -30,7 +29,7 @@ EMPTY_BLOCK_HASH = hashlib.sha256(
 SLUG = "-work-shop"
 
 # Must equal the same constant in the other repo (coding-discovery-tool / ai-gateway-data).
-MEMORY_SECRET_RULES_SHA256 = "60fadeb516fc2638d77bb1cddafa27894f4569ad979103d787661d60293ef387"
+MEMORY_SECRET_RULES_SHA256 = "97c6891151ef606afc2e45e87e6bacf9e49dd6ef0d3b382b18a2a6089e9419ed"
 
 PRIVATE_KEY_BLOCK = (
     "-----BEGIN RSA PRIVATE KEY-----\n" + "MIIEowIBAAKCAQEA1b2c3d4e5f6g7h8i9j0k1l2m3n4\n" * 3
@@ -84,7 +83,6 @@ SHOULD_MASK = [
     ("Mixed-case hyphenated key in URL query", "https://x.example.com/a?key=" + "abc-DEF-123-ghi-456-JKL-789"),
     ("Long all-digit token", "API_TOKEN=" + "12345678901234567890"),
     ("Database URL with a real password on localhost", "postgres://postgres:Xk9mP2qL7wRz@localhost:5432/app"),
-    ("Quoted URL carrying a password after a token key", 'token: "https://deploy:hunter2pass9@git.example.com/x"'),
     ("URL password with a percent-encoded character", "postgres://app:%23Xk9mP2qL@db.example.com/app"),
     ("URL password starting with a dollar", "postgres://app:$uperS3cret@db.example.com/app"),
     ("URL password that only starts like a template", "postgres://app:${x}Rl9!secret@db.example.com/app"),
@@ -94,12 +92,6 @@ SHOULD_MASK = [
     ("Stock URL password on a host that only starts with localhost", "postgres://admin:admin@localhost.evil.com/app"),
     ("URL password that only starts like a command substitution", "postgres://app:$(x)Rl9!secret@db.example.com/app"),
     ("URL password in braces with digits", "postgres://app:{Pr0dPass99}@db.corp.example.com/app"),
-    ("Quoted URL with a short token in its path", 'token: "https://x.example.com/t/' + "Ab3dE5gH7jK9mN1p" + '"'),
-    ("Quoted URL with a query string after a token key",
-     'token: "https://x.example.com/cb?auth=' + "Ab3dE5gH7jK9mN1p" + '"'),
-    ("Quoted webhook URL with a long token in its path",
-     'secret: "https://discord.com/api/webhooks/123456789012345678/'
-     + "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcd" + '"'),
     ("Google API key with a hyphen in URL query",
      "https://maps.googleapis.com/maps/api/geocode/json?key=" + "AIza" + "SyD-3x4mpl3K3y_abcdefghijklmnopqrst"),
     ("Private key with a short last line", PRIVATE_KEY_BLOCK.replace("-----END", "AB==\n-----END")),
@@ -134,12 +126,6 @@ SHOULD_NOT_MASK = [
     ("URL with the password same as the username on a bare host name", "amqp://guest:guest@mq:5672"),
     ("Local stock URL at the end of a sentence", "Use postgres://postgres:postgres@localhost."),
     ("Local stock URL in bold", "**postgres://postgres:postgres@localhost**"),
-    ("Quoted token endpoint with a hyphenated tenant",
-     'token: "https://acme-corporation.okta.com/oauth2/default/v1/token"'),
-    ("Quoted token endpoint with a short query value", 'token: "https://oauth2.googleapis.com/token?alt=json"'),
-    ("Quoted docs URL with a long hyphenated path",
-     'password: "https://example.com/documentation/getting-started-with-the-service"'),
-    ("Quoted URL after a token key", 'token: "https://oauth2.googleapis.com/token"'),
     ("URL password that is a shell variable", "postgres://app:$DB_PASS@db/app"),
     ("URL password that is an angle-bracket placeholder", "postgres://app:<password>@db/app"),
     ("URL password that is a format placeholder", "postgres://app:%s@db/app"),
@@ -1049,14 +1035,6 @@ class TestMemorySecretRules(unittest.TestCase):
         for label, line in SHOULD_NOT_MASK:
             with self.subTest(label):
                 self.assertEqual(memory_secret_rules.find_secrets(line), [])
-
-    def test_a_file_of_quoted_urls_full_of_query_marks_is_scanned_quickly(self):
-        hostile = ('token: "https://' + "?=" * 1000 + " ") * 50
-        started = time.monotonic()
-
-        memory_secret_rules.find_secrets(hostile)
-
-        self.assertLess(time.monotonic() - started, 5)
 
 
 if __name__ == "__main__":

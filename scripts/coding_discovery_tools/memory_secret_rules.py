@@ -21,9 +21,9 @@ _STOCK_WORDS = (
     r'(?i:password|passwd|pass|pwd|secret|changeme|example|test|admin|root|postgres|mysql|mongo|redis|user|username'
     r'|guest|default|x{3,60}|none|null)'
 )
-# A URL password that is a template with no fallback value, or a stock default on a local host: not a secret.
+# A URL password that is a bare template name, or a stock default on a local host: not a secret.
 _STOCK_URL_PASSWORD = (
-    r'(?!\$\{[A-Za-z_][A-Za-z0-9_]{0,60}(?::?\?[^}@]{0,60}|:?[-=+])?\}@|\$\([^)@]{0,60}\)@'
+    r'(?!\$\{[A-Za-z_][A-Za-z0-9_]{0,60}(?::?[-=+])?\}@'
     r'|\$(?:[A-Z_]{1,60}|[A-Z][A-Z0-9]{0,30}_[A-Z0-9_]{0,30})@|<[A-Za-z_][A-Za-z_ .-]{0,60}>@'
     r'|\{[A-Za-z_][A-Za-z_ .-]{0,60}\}@|\{\{ ?[A-Za-z_][A-Za-z0-9_ .|-]{0,60}\}\}@'
     r'|%\([A-Za-z_][A-Za-z0-9_]{0,60}\)[sd]@|%[sdv]@|%[A-Za-z_]{1,60}%@|\*{1,60}@)'

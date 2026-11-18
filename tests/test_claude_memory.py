@@ -29,7 +29,7 @@ EMPTY_BLOCK_HASH = hashlib.sha256(
 SLUG = "-work-shop"
 
 # Must equal the same constant in the other repo (coding-discovery-tool / ai-gateway-data).
-MEMORY_SECRET_RULES_SHA256 = "65eee9112ee1bc91e69da5ec022a723ef763b7389ac665f68b0d58a9d75b62c8"
+MEMORY_SECRET_RULES_SHA256 = "a0b6cd0c28fd556474d7fffe066ae3759fa4f301ae520e2739034c0acbb878fd"
 
 PRIVATE_KEY_BLOCK = (
     "-----BEGIN RSA PRIVATE KEY-----\n" + "MIIEowIBAAKCAQEA1b2c3d4e5f6g7h8i9j0k1l2m3n4\n" * 3
@@ -93,6 +93,9 @@ SHOULD_MASK = [
     ("URL password that only starts like a command substitution", "postgres://app:$(x)Rl9!secret@db.example.com/app"),
     ("URL password in braces with digits", "postgres://app:{Pr0dPass99}@db.corp.example.com/app"),
     ("URL password template with a real fallback value", "postgres://app:${DB_PASS:-S3cretProd9}@db.example.com/app"),
+    ("URL password inside a command substitution", "postgres://app:$(printf S3cretProd9)@db.example.com/app"),
+    ("URL password template with text after a question mark",
+     "postgres://app:${DB_PASS:?S3cretProd9}@db.example.com/app"),
     ("Google API key with a hyphen in URL query",
      "https://maps.googleapis.com/maps/api/geocode/json?key=" + "AIza" + "SyD-3x4mpl3K3y_abcdefghijklmnopqrst"),
     ("Private key with a short last line", PRIVATE_KEY_BLOCK.replace("-----END", "AB==\n-----END")),

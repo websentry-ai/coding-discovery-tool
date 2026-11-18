@@ -760,6 +760,18 @@ class ClaudeAISameOrgSessionConnectorsTest(unittest.TestCase):
                    for s in p["mcpServers"]]
         self.assertEqual([s["scan"]["tools"] for s in servers], [[{"name": "send_message", "description": "Send."}]])
 
+    def test_resaved_old_sessions_do_not_use_up_the_cap(self):
+        self._signed_in()
+        org_dir = self.app_dir / "claude-code-sessions" / "acct-1" / "org-1"
+        _write_session(org_dir, "local_used.json", [_connector("Linear")], self.now - 2 * 86400)
+        for index in range(2):
+            _write_session(org_dir, f"local_resaved_{index}.json", [_connector("Gmail")], self.now - 3600 - index,
+                           last_activity=(self.now - 60 * 86400) * 1000)
+        with mock.patch.object(helpers, "_SESSION_MAX_FILES", 2):
+            self.assertEqual(self._names("Claude Cowork"), ["claude.ai Linear"])
+        with mock.patch.object(helpers, "_SESSION_MAX_FILES_READ", 2):
+            self.assertEqual(self._names("Claude Cowork"), STALE)
+
     def test_unusable_last_activity_falls_back_to_file_time(self):
         self._signed_in()
         org_dir = self.app_dir / "claude-code-sessions" / "acct-1" / "org-1"

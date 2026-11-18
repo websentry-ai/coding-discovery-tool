@@ -29,7 +29,7 @@ EMPTY_BLOCK_HASH = hashlib.sha256(
 SLUG = "-work-shop"
 
 # Must equal the same constant in the other repo (coding-discovery-tool / ai-gateway-data).
-MEMORY_SECRET_RULES_SHA256 = "1a14c32a69d474739cc76dd3ba84494bc6fb48c17a5106209e50c4d942a2151c"
+MEMORY_SECRET_RULES_SHA256 = "2953e0c52b64f946082f5d575868e08ff9ed99f51979ffe5c7fe87758f5996c0"
 
 PRIVATE_KEY_BLOCK = (
     "-----BEGIN RSA PRIVATE KEY-----\n" + "MIIEowIBAAKCAQEA1b2c3d4e5f6g7h8i9j0k1l2m3n4\n" * 3
@@ -82,6 +82,13 @@ SHOULD_MASK = [
     ("UUID key in URL query", "https://api.example.com/data?key=" + "6a41c739-57cf-46a9-b53d-cda412bb3d24"),
     ("Mixed-case hyphenated key in URL query", "https://x.example.com/a?key=" + "abc-DEF-123-ghi-456-JKL-789"),
     ("Long all-digit token", "API_TOKEN=" + "12345678901234567890"),
+    ("Database URL with a real password on localhost", "postgres://postgres:Xk9mP2qL7wRz@localhost:5432/app"),
+    ("Quoted URL carrying a password after a token key", 'token: "https://deploy:hunter2pass9@git.example.com/x"'),
+    ("URL password with a percent-encoded character", "postgres://app:%23Xk9mP2qL@db.example.com/app"),
+    ("URL password starting with a dollar", "postgres://app:$uperS3cret@db.example.com/app"),
+    ("Quoted webhook URL with a long token in its path",
+     'secret: "https://discord.com/api/webhooks/123456789012345678/'
+     + "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcd" + '"'),
     ("Google API key with a hyphen in URL query",
      "https://maps.googleapis.com/maps/api/geocode/json?key=" + "AIza" + "SyD-3x4mpl3K3y_abcdefghijklmnopqrst"),
     ("Private key with a short last line", PRIVATE_KEY_BLOCK.replace("-----END", "AB==\n-----END")),
@@ -110,6 +117,14 @@ SHOULD_NOT_MASK = [
     ("Private key placeholder", "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"),
     ("pwd under the root home", "pwd: /root/repo2"),
     ("Long docs slug key", "https://docs.example.com/a?key=getting-started-with-v2-guide"),
+    ("Local database URL with a stock password", "postgres://postgres:postgres@localhost:5432/app"),
+    ("Database URL with a placeholder password", "mysql://user:password@db:3306/app"),
+    ("Database URL with variables", "postgres://${DB_USER}:${DB_PASS}@db.internal:5432/app"),
+    ("URL with the password same as the username", "amqp://guest:guest@mq.internal:5672"),
+    ("Quoted URL after a token key", 'token: "https://oauth2.googleapis.com/token"'),
+    ("URL password that is a shell variable", "postgres://app:$DB_PASS@db/app"),
+    ("URL password that is an angle-bracket placeholder", "postgres://app:<password>@db/app"),
+    ("URL password that is a format placeholder", "postgres://app:%s@db/app"),
     ("pwd output", "pwd: /Users/dev/repo2"),
     ("pwd home path", "pwd: ~/code/app-v3"),
     ("Password reset URL", "password_reset_url: https://app.example.com/v2/reset"),

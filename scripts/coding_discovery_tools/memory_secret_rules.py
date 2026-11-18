@@ -5,12 +5,20 @@ from itertools import accumulate
 from typing import Dict, Iterator, List, Pattern, Tuple
 
 # Kept byte-identical in coding-discovery-tool and ai-gateway-data; bump RULES_VERSION on any change.
-RULES_VERSION = 3
+RULES_VERSION = 4
 
 # A quoted value that is a placeholder, a shell variable or a template, not a secret.
 _PLACEHOLDER = (
     r'(?![<{])(?!\$[({]|\$(?-i:[A-Z_][A-Z0-9_]*)["\'])(?![*xX]+["\'])'
+    r'(?![A-Za-z][A-Za-z0-9+.-]{0,30}://(?![^\'"\s]{0,2000}[A-Za-z0-9_-]{24})[^\'"\s]{0,2000}["\'])'
     r'(?!(?:changeme|password|example|placeholder|redacted)["\'])(?!your[_-][^\'"\s]*["\'])'
+)
+# A URL password that is a variable, a template or a stock default, not a secret.
+_STOCK_URL_PASSWORD = (
+    r'(?!\$[({]|\$[A-Z_][A-Z0-9_]{0,60}@|<[^>@]{0,60}>@|\{[^}@]{0,60}\}{1,2}@|%\(|%[sdv]@'
+    r'|%[A-Za-z_][A-Za-z0-9_]{0,60}%@|\*{1,60}@)'
+    r'(?!(?i:password|passwd|pass|pwd|secret|changeme|example|test|admin|root|postgres|mysql|mongo|redis|user|username'
+    r'|guest|default|x{3,60}|none|null)@)'
 )
 # A key that names a setting about the secret (its name, URL, TTL...) rather than holding it.
 _DESCRIPTOR_KEY = (
@@ -93,7 +101,10 @@ SECRET_RULES: Tuple[Tuple[str, Pattern, Tuple[Pattern, ...]], ...] = (
     ),
     (
         'SECRET-011',
-        re.compile(r'(?:mongodb|mysql|postgresql|postgres)://[^:@/\s]{1,100}:[^@\n]{1,200}@'),
+        re.compile(
+            r'(?:mongodb|mysql|postgresql|postgres)://(?P<db_user>[^:@/\s]{1,100}):(?!(?P=db_user)@)'
+            + _STOCK_URL_PASSWORD + r'[^@\n]{1,200}@'
+        ),
         (),
     ),
     (
@@ -166,7 +177,7 @@ SECRET_RULES: Tuple[Tuple[str, Pattern, Tuple[Pattern, ...]], ...] = (
     ),
     (
         'SECRET-022',
-        re.compile(r'(?<=://)[^\s:@/]*:[^\s/@]+@'),
+        re.compile(r'(?<=://)(?P<url_user>[^\s:@/]*):(?!(?P=url_user)@)' + _STOCK_URL_PASSWORD + r'[^\s/@]+@'),
         (),
     ),
     (

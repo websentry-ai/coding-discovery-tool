@@ -2741,8 +2741,13 @@ def _claude_app_support_dir(home: Path) -> Path:
 
 
 def _scans_another_users_home(home: Path) -> bool:
-    running_as_root = hasattr(os, "geteuid") and os.geteuid() == 0
-    return running_as_root or os.path.realpath(str(home)) != os.path.realpath(str(Path.home()))
+    """True for any elevated scan too: root, or a Windows administrator or SYSTEM."""
+    if platform.system() == "Windows":
+        from .windows_extraction_helpers import _running_as_local_system, windows_admin_state
+        elevated = bool(windows_admin_state()) or _running_as_local_system()
+    else:
+        elevated = hasattr(os, "geteuid") and os.geteuid() == 0
+    return elevated or os.path.realpath(str(home)) != os.path.realpath(str(Path.home()))
 
 
 def _read_json_dict(path: Path, home: Path, max_bytes: int) -> Dict[str, Any]:
@@ -2987,8 +2992,7 @@ def _desktop_account_folder(app_dir: Path, owner_home: Path, contained: bool) ->
 def _newest_desktop_session_connectors(home: Path) -> Optional[Tuple[float, List[Any]]]:
     """(mtime, `remoteMcpServersConfig`) of the newest session file from the last 30 days that has one."""
     app_dir = _claude_app_support_dir(home)
-    running_as_root = hasattr(os, "geteuid") and os.geteuid() == 0
-    contained = running_as_root or os.path.realpath(str(home)) != os.path.realpath(str(Path.home()))
+    contained = _scans_another_users_home(home)
     account = _desktop_account_folder(app_dir, home, contained)
 
     session_roots: List[Tuple[Path, Optional[str]]] = []

@@ -56,9 +56,12 @@ class ClaudeAINameSourcesTest(unittest.TestCase):
         self.claude_dir = self.home / ".claude"
         self.claude_dir.mkdir()
         # Default to a platform whose session dir is absent in the temp home.
-        patcher = mock.patch.object(helpers.platform, "system", return_value="Darwin")
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for patcher in (
+            mock.patch.object(helpers.platform, "system", return_value="Darwin"),
+            mock.patch.object(helpers.Path, "home", return_value=self.home),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.addCleanup(self._tmp.cleanup)
 
     def _extract(self):
@@ -164,9 +167,12 @@ class ClaudeAISessionToolsTest(unittest.TestCase):
             self.home / "Library" / "Application Support" / "Claude"
             / "local-agent-mode-sessions"
         )
-        patcher = mock.patch.object(helpers.platform, "system", return_value="Darwin")
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for patcher in (
+            mock.patch.object(helpers.platform, "system", return_value="Darwin"),
+            mock.patch.object(helpers.Path, "home", return_value=self.home),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.addCleanup(self._tmp.cleanup)
         _write_json(self.home / ".claude.json", {
             "claudeAiMcpEverConnected": ["claude.ai Gmail", "claude.ai Spotify"],
@@ -691,6 +697,9 @@ def _must_not_block(test, seconds=3):
     test.assertFalse(blocked, "the scan blocked on a pipe")
 
 
+NOT_ELEVATED = mock.patch.object(os, "geteuid", return_value=501, create=True)
+
+
 class ClaudeAIUnsafeFileRootScanTest(unittest.TestCase):
     """On a root scan, pipes and links planted in a home are neither waited on nor followed."""
 
@@ -751,13 +760,13 @@ class ClaudeAIUnsafeFileRootScanTest(unittest.TestCase):
             os.symlink(self.bob / ".claude.json", self.alice / ".claude.json")
         except (OSError, NotImplementedError):
             self.skipTest("cannot create symlinks here")
-        with mock.patch.object(helpers.Path, "home", return_value=self.alice):
+        with mock.patch.object(helpers.Path, "home", return_value=self.alice), NOT_ELEVATED:
             self.assertEqual(helpers._claudeai_names_from_config(self.alice), ["claude.ai Mine"])
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "needs FIFO support")
     def test_own_home_scan_skips_a_pipe_in_place_of_the_cli_config(self):
         os.mkfifo(self.alice / ".claude.json")
-        with mock.patch.object(helpers.Path, "home", return_value=self.alice), _must_not_block(self):
+        with mock.patch.object(helpers.Path, "home", return_value=self.alice), NOT_ELEVATED, _must_not_block(self):
             self.assertEqual(helpers._claudeai_names_from_config(self.alice), [])
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "needs FIFO support")
@@ -772,6 +781,16 @@ class ClaudeAIUnsafeFileRootScanTest(unittest.TestCase):
         for extractor in (MacOSClaudeMCPConfigExtractor, LinuxClaudeMCPConfigExtractor):
             with _must_not_block(self):
                 self.assertEqual(extractor()._extract_from_config_file(self.alice / ".claude.json"), [])
+
+    def test_windows_admin_or_system_scan_of_own_home_is_contained(self):
+        windows = "scripts.coding_discovery_tools.windows_extraction_helpers."
+        for admin, system, contained in ((True, False, True), (None, True, True), (False, False, False)):
+            with self.subTest(admin=admin, system=system), \
+                    mock.patch.object(helpers.platform, "system", return_value="Windows"), \
+                    mock.patch.object(helpers.Path, "home", return_value=self.alice), \
+                    mock.patch(windows + "windows_admin_state", return_value=admin), \
+                    mock.patch(windows + "_running_as_local_system", return_value=system):
+                self.assertEqual(helpers._scans_another_users_home(self.alice), contained)
 
     def test_oversize_session_file_is_skipped(self):
         self._cli(self.alice, ["claude.ai Slack"])

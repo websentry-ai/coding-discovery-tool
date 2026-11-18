@@ -304,6 +304,9 @@ def attach_skill_folders(tool_result: Dict) -> None:
         for skill in (project.get("skills") or []) if isinstance(project, dict) else []:
             if not isinstance(skill, dict) or "files" in skill or not skill.get("skill_name"):
                 continue
+            # Commands and agents are single files, even one named SKILL.md: its siblings are other commands.
+            if skill.get("type", "skill") != "skill":
+                continue
             file_path = skill.get("file_path")
             if (skill.get("file_name") or "").lower() != SKILL_FILE_NAME.lower() or not file_path:
                 continue

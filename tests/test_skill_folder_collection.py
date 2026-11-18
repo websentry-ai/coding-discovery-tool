@@ -428,6 +428,18 @@ class TestAttach(SkillFolderTestCase):
         sf.attach_skill_folders(result)
         self.assertFalse(any("files" in s for s in result["projects"][0]["skills"]))
 
+    def test_a_command_or_agent_named_skill_md_gets_no_folder(self):
+        for kind in ("command", "agent"):
+            with self.subTest(kind=kind):
+                folder = self.home / ".claude" / f"{kind}s"
+                folder.mkdir(parents=True, exist_ok=True)
+                (folder / "SKILL.md").write_text("a flat item that happens to be called SKILL.md")
+                (folder / "other.md").write_text("an unrelated sibling")
+                entry = self.skill_entry(file_path=str(folder / "SKILL.md"), type=kind)
+                result = self.result(entry)
+                sf.attach_skill_folders(result)
+                self.assertNotIn("files", result["projects"][0]["skills"][0])
+
     def test_unwalkable_folder_leaves_the_skill_as_before(self):
         result = self.result(self.skill_entry(file_path="/SKILL.md"))
         sf.attach_skill_folders(result)

@@ -311,9 +311,14 @@ def _check_file(path: Path, folder: Path, cached_entry: object,
     return entry, item
 
 
+def _cost(item: Dict) -> int:
+    """The sent size of an item: its JSON-escaped content, findings and hosts."""
+    return sum(len(json.dumps(item[key])) for key in ("content", "findings", "url_hosts"))
+
+
 def _fits_budget(item: Dict, content_budget: List[int]) -> bool:
-    """True and spends the item's sent size (JSON-escaped content, findings, hosts) from the budget when it fits."""
-    cost = sum(len(json.dumps(item[key])) for key in ("content", "findings", "url_hosts"))
+    """True and spends the item's sent size from the budget when it fits."""
+    cost = _cost(item)
     if cost > content_budget[0]:
         return False
     content_budget[0] -= cost
@@ -336,7 +341,7 @@ def _other_files(pairs: List[Tuple[Path, Dict]], index_path: Path) -> List[Dict]
 
 
 def _scan_folder(folder: Dict, cached_entries: Dict, deadline: float, content_budget: List[int],
-                 held_budget: List[int], url_scan: bool = False) -> Tuple[Optional[Dict], Dict]:
+                 url_scan: bool = False) -> Tuple[Optional[Dict], Dict]:
     """(scan of a folder or None when it has no memory files, cache entries by file path)."""
     root = folder["path"]
     candidates = islice(_markdown_files(root, deadline), MAX_FILES_PER_MEMORY_FOLDER)
@@ -351,20 +356,34 @@ def _scan_folder(folder: Dict, cached_entries: Dict, deadline: float, content_bu
     index_path = root / INDEX_FILE_NAME
     ordered = sorted(((path, item) for path, _, item in checked if item), key=lambda pair: pair[0] != index_path)
     with_findings = [pair for pair in ordered if pair[1]["findings"]]
-    url_only = [pair for pair in ordered if not pair[1]["findings"]]
     sent = _fitting(with_findings, 0, index_path, content_budget)
-    # URL-only files wait for every folder's findings; only as much of them as could ever be sent is kept in memory.
-    held = _fitting(url_only, len(_other_files(sent, index_path)), index_path, held_budget)
-    return {"folder": folder, "entries": entries, "index_path": index_path, "sent": sent, "held": held,
-            "not_sent": len(with_findings) - len(sent), "url_only_dropped": len(url_only) - len(held)}, entries
+    # URL-only files wait for every folder's findings; only their path and size are kept, not their content.
+    url_only = [(path, _cost(item)) for path, item in ordered if not item["findings"]]
+    return {"folder": folder, "entries": entries, "index_path": index_path, "sent": sent, "url_only": url_only,
+            "not_sent": len(with_findings) - len(sent)}, entries
+
+
+def _url_only_fitting(scan: Dict, content_budget: List[int], url_scan: bool) -> List[Tuple[Path, Dict]]:
+    """The folder's URL-only files that fit what is left of the budget, read again now that they are needed."""
+    index_path, fitting = scan["index_path"], []
+    slots = MAX_FLAGGED_FILES_PER_FOLDER - len(_other_files(scan["sent"], index_path))
+    for path, cost in scan["url_only"]:
+        if (path != index_path and slots <= 0) or cost > content_budget[0]:
+            continue
+        checked = _check_file(path, scan["folder"]["path"], scan["entries"].get(str(path)), url_scan)
+        item = checked and checked[1]
+        if item and not item["findings"] and _fits_budget(item, content_budget):
+            fitting.append((path, item))
+            slots -= path != index_path
+    return fitting
 
 
 def _folder_payload(scan: Dict, content_budget: List[int], url_scan: bool) -> Dict:
-    """The payload entry of a scanned folder; its held URL-only files take what is left of the budget."""
+    """The payload entry of a scanned folder; its URL-only files take what is left of the budget."""
     index_path = scan["index_path"]
-    sent_urls = _fitting(scan["held"], len(_other_files(scan["sent"], index_path)), index_path, content_budget)
+    sent_urls = _url_only_fitting(scan, content_budget, url_scan)
     sent = scan["sent"] + sent_urls
-    url_only_not_sent = scan["url_only_dropped"] + len(scan["held"]) - len(sent_urls)
+    url_only_not_sent = len(scan["url_only"]) - len(sent_urls)
     entries = list(scan["entries"].values())
     flagged = [entry for entry in entries if entry["findings"]]
     url_only = [entry for entry in entries if not entry["findings"] and _sendable(entry, url_scan)]
@@ -428,9 +447,9 @@ def collect_claude_memories(home: Path, home_user: str, url_scan: bool = False) 
         cached_entries = users.get(home_user)
         cached_entries = cached_entries if isinstance(cached_entries, dict) else {}
         memory_folders, project_entries = _memory_folders(home, deadline, cached_entries)
-        content_budget, held_budget = [MAX_MEMORY_CONTENT_BYTES], [MAX_MEMORY_CONTENT_BYTES]
+        content_budget = [MAX_MEMORY_CONTENT_BYTES]
         scanned = [
-            _scan_folder(folder, cached_entries, deadline, content_budget, held_budget, url_scan)
+            _scan_folder(folder, cached_entries, deadline, content_budget, url_scan)
             for folder in takewhile(lambda _: time.monotonic() < deadline, memory_folders)
         ]
         entries = {**project_entries,

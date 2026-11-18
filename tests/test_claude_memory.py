@@ -734,7 +734,7 @@ class TestMemoryDiscovery(_MemoryHome):
         self.assertEqual(([item["file_name"] for item in second["flagged"]], first["flagged"]), (["db.md"], []))
         self.assertEqual((first["counts"]["url_only_not_sent"], second["counts"].get("not_sent")), (1, None))
 
-    def test_url_only_content_kept_while_scanning_never_exceeds_the_upload_budget(self):
+    def test_url_only_files_keep_no_content_in_memory_while_folders_are_scanned(self):
         link_text = "see https://a.example.com\n"
         for slug in ("-a", "-b", "-c"):
             _write(_memory_dir(self.home, slug) / "links.md", link_text)
@@ -743,8 +743,21 @@ class TestMemoryDiscovery(_MemoryHome):
                 patch.object(cmh, "_folder_payload", wraps=cmh._folder_payload) as payload:
             folders = self.collect(url_scan=True)["folders"]
 
-        self.assertEqual([len(call.args[0]["held"]) for call in payload.call_args_list], [1, 0, 0])
+        kept = [waiting for call in payload.call_args_list for waiting in call.args[0]["url_only"]]
+        self.assertEqual([cost for _, cost in kept], [_sent_cost(link_text)] * 3)
         self.assertEqual([folder["counts"].get("url_only_not_sent", 0) for folder in folders], [0, 1, 1])
+
+    def test_a_small_url_only_file_is_sent_when_an_earlier_larger_one_no_longer_fits(self):
+        secret_text, small_text = "url: " + FAKE_SECRET + "\n", "see https://b.example.com\n"
+        _write(_memory_dir(self.home, "-a") / "big.md", "see https://a.example.com\n" + "x" * 400)
+        _write(_memory_dir(self.home, "-b") / "db.md", secret_text)
+        _write(_memory_dir(self.home, "-b") / "small.md", small_text)
+
+        with patch.object(cmh, "MAX_MEMORY_CONTENT_BYTES", _sent_cost(secret_text) + _sent_cost(small_text) + 5):
+            first, second = self.collect(url_scan=True)["folders"]
+
+        self.assertEqual([item["file_name"] for item in second["flagged"]], ["db.md", "small.md"])
+        self.assertEqual((first["flagged"], first["counts"]["url_only_not_sent"]), ([], 1))
 
     def test_url_only_files_over_the_folder_cap_do_not_use_up_what_later_folders_may_hold(self):
         link_text = "see https://a.example.com\n"

@@ -637,6 +637,13 @@ class TestOwnerContainment(unittest.TestCase):
         _registry(self.alice_plugins, "aliceplug@mkt", self.bob_plugin)
         self.assertEqual(self._scan_alice(), [])
 
+    def test_registry_linked_into_another_home_is_not_trusted(self):
+        bob_plugins = self.bob / ".claude" / "plugins"
+        _registry(bob_plugins, "bobplug@mkt", self.bob_plugin)
+        _write_json(self.alice_plugins / "cache" / "mkt" / "aliceplug" / "1.0.0" / ".mcp.json", _server("mine"))
+        self._link(bob_plugins / "installed_plugins.json", self.alice_plugins / "installed_plugins.json")
+        self.assertEqual(_server_names(self._scan_alice()[0]), _exposed("aliceplug", "mine"))
+
     def test_oversize_plugin_file_is_skipped(self):
         install_path = self.alice / "dev" / "plugin"
         _write_json(install_path / ".mcp.json", {"mcpServers": {"big": {"command": "x" * (6 * 1024 * 1024)}}})

@@ -760,6 +760,27 @@ class ClaudeAIUnsafeFileRootScanTest(unittest.TestCase):
             self.skipTest("cannot create symlinks here")
         self.assertEqual(self._servers(), {"bob": {"claude.ai BobOnly": []}})
 
+    def test_claude_code_config_linked_out_of_its_home_is_not_read(self):
+        _write_json(self.bob / ".claude.json", {})
+        _write_json(self.alice / "dotfiles" / "claude.json", {})
+
+        def homes_read(target):
+            link = self.alice / ".claude.json"
+            if link.is_symlink():
+                link.unlink()
+            try:
+                os.symlink(target, link)
+            except (OSError, NotImplementedError):
+                self.skipTest("cannot create symlinks here")
+            read = []
+            helpers.extract_dual_path_configs_with_root_support(
+                self.root_home / ".claude.json", self.root_home / ".claude" / "mcp.json",
+                lambda config_path: read.append(config_path.parent.name) or [])
+            return read
+
+        self.assertEqual(homes_read(self.bob / ".claude.json"), ["bob"])
+        self.assertEqual(homes_read(self.alice / "dotfiles" / "claude.json"), ["alice", "bob"])
+
     def test_own_home_scan_still_follows_a_linked_cli_config(self):
         self._cli(self.bob, ["claude.ai Mine"])
         try:

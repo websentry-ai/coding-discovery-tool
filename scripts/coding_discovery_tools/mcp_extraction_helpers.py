@@ -2590,6 +2590,10 @@ def extract_dual_path_configs_with_root_support(
     import platform
     
     all_projects = []
+
+    def extract_owned(config_path: Path, home: Path) -> List[Dict]:
+        # On an admin scan a config that links out of its home is another user's file.
+        return [] if _config_leaves_home(config_path, home) else extract_from_file_func(config_path)
     
     # Check if running as admin/root
     is_admin = False
@@ -2630,7 +2634,7 @@ def extract_dual_path_configs_with_root_support(
             try:
                 user_preferred = user_dir / preferred_path.relative_to(Path.home())
                 if user_preferred.exists():
-                    user_projects = extract_from_file_func(user_preferred)
+                    user_projects = extract_owned(user_preferred, user_dir)
                     if user_projects:
                         all_projects.extend(user_projects)
                         continue
@@ -2641,7 +2645,7 @@ def extract_dual_path_configs_with_root_support(
             try:
                 user_fallback = user_dir / fallback_path.relative_to(Path.home())
                 if user_fallback.exists():
-                    user_projects = extract_from_file_func(user_fallback)
+                    user_projects = extract_owned(user_fallback, user_dir)
                     if user_projects:
                         all_projects.extend(user_projects)
             except (ValueError, OSError):
@@ -2653,21 +2657,21 @@ def extract_dual_path_configs_with_root_support(
         import platform as _platform
         if _platform.system() != "Linux" and not _own_home_already_scanned(admin_homes):
             if preferred_path.exists():
-                root_projects = extract_from_file_func(preferred_path)
+                root_projects = extract_owned(preferred_path, Path.home())
                 if root_projects:
                     all_projects.extend(root_projects)
             elif fallback_path.exists():
-                root_projects = extract_from_file_func(fallback_path)
+                root_projects = extract_owned(fallback_path, Path.home())
                 if root_projects:
                     all_projects.extend(root_projects)
     else:
         # For regular users, check their own home directory
         if preferred_path.exists():
-            user_projects = extract_from_file_func(preferred_path)
+            user_projects = extract_owned(preferred_path, Path.home())
             if user_projects:
                 all_projects.extend(user_projects)
         elif fallback_path.exists():
-            user_projects = extract_from_file_func(fallback_path)
+            user_projects = extract_owned(fallback_path, Path.home())
             if user_projects:
                 all_projects.extend(user_projects)
     
@@ -2748,6 +2752,15 @@ def _scans_another_users_home(home: Path) -> bool:
     else:
         elevated = hasattr(os, "geteuid") and os.geteuid() == 0
     return elevated or os.path.realpath(str(home)) != os.path.realpath(str(Path.home()))
+
+
+def _config_leaves_home(config_path: Path, home: Path) -> bool:
+    """True on an admin scan when `config_path` resolves outside `home`."""
+    if not _scans_another_users_home(home):
+        return False
+    from .path_containment import is_within, owned_boundary
+    home_real = owned_boundary(home, home)
+    return home_real is None or not is_within(config_path, home_real)
 
 
 def _read_json_dict(path: Path, home: Path, max_bytes: int) -> Dict[str, Any]:
@@ -3268,27 +3281,29 @@ def _select_plugin_version_dir(plugin_dir: Path) -> Optional[Path]:
         return None
 
 
-def _installed_plugins_registry(plugins_root: Path) -> Optional[Dict]:
+def _installed_plugins_registry(plugins_root: Path, boundary_real: Optional[str] = None) -> Optional[Dict]:
     """The ``plugins`` map, ``None`` when the file is missing or malformed.
 
     An empty map means every plugin was uninstalled, not "no registry" — the
     latter would resurrect the cache's leftovers. ``version`` is not gated on:
     a bumped file would otherwise drop every plugin.
     """
-    data = _read_plugin_json(plugins_root / "installed_plugins.json")
+    data = _read_plugin_json(plugins_root / "installed_plugins.json", boundary_real)
     plugins = data.get("plugins") if isinstance(data, dict) else None
     return plugins if isinstance(plugins, dict) else None
 
 
-def _marketplace_registry(plugins_root: Path) -> Dict:
+def _marketplace_registry(plugins_root: Path, boundary_real: Optional[str] = None) -> Dict:
     """``known_marketplaces.json`` keyed by marketplace name."""
-    data = _read_plugin_json(plugins_root / "known_marketplaces.json")
+    data = _read_plugin_json(plugins_root / "known_marketplaces.json", boundary_real)
     return data if isinstance(data, dict) else {}
 
 
-def _directory_marketplace_plugin_dir(location: Path, plugin: str) -> Optional[Path]:
+def _directory_marketplace_plugin_dir(
+    location: Path, plugin: str, boundary_real: Optional[str] = None
+) -> Optional[Path]:
     """The dir a directory-source marketplace's manifest assigns to ``plugin``."""
-    manifest = _read_plugin_json(location / ".claude-plugin" / "marketplace.json")
+    manifest = _read_plugin_json(location / ".claude-plugin" / "marketplace.json", boundary_real)
     if not isinstance(manifest, dict):
         return None
     for entry in (manifest.get("plugins") or []):
@@ -3313,6 +3328,7 @@ def _authoritative_plugin_dirs(
     plugin: str,
     marketplace_info: Dict,
     installed_entries: List,
+    boundary_real: Optional[str] = None,
 ) -> List[Path]:
     """Every dir that may hold ``plugin``, most authoritative first.
 
@@ -3335,7 +3351,7 @@ def _authoritative_plugin_dirs(
         for candidate in (
             location / "plugins" / plugin,
             location / plugin,
-            _directory_marketplace_plugin_dir(location, plugin),
+            _directory_marketplace_plugin_dir(location, plugin, boundary_real),
         ):
             if candidate is not None and candidate not in dirs:
                 dirs.append(candidate)
@@ -3420,11 +3436,11 @@ def _extract_registered_plugin_mcp(
 
     False when the registry is unusable, so the caller falls back to disk.
     """
-    installed = _installed_plugins_registry(plugins_root)
+    installed = _installed_plugins_registry(plugins_root, boundary_real)
     if installed is None:
         return False
 
-    marketplaces = _marketplace_registry(plugins_root)
+    marketplaces = _marketplace_registry(plugins_root, boundary_real)
 
     for plugin_id, entries in installed.items():
         plugin, _, marketplace = str(plugin_id).partition('@')
@@ -3433,7 +3449,7 @@ def _extract_registered_plugin_mcp(
         marketplace_info = marketplaces.get(marketplace) or {}
         entry_list = entries if isinstance(entries, list) else []
 
-        for plugin_dir in _authoritative_plugin_dirs(plugin, marketplace_info, entry_list):
+        for plugin_dir in _authoritative_plugin_dirs(plugin, marketplace_info, entry_list, boundary_real):
             servers = _plugin_mcp_server_map(plugin_dir, boundary_real)
             if not servers:
                 continue

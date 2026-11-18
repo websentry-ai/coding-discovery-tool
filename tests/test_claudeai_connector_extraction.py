@@ -786,19 +786,35 @@ class ClaudeAIUnsafeFileRootScanTest(unittest.TestCase):
             self.assertEqual(helpers.read_claude_code_config(self.alice / ".claude.json")["mcpServers"], {"mine": {}})
             self.assertEqual(helpers._claudeai_names_from_config(self.alice), [])
 
-    def test_oversize_claude_code_config_gives_way_to_the_fallback(self):
+    def _own_home_local_servers(self):
         from scripts.coding_discovery_tools.macos.claude_code.mcp_config_extractor import (
             MacOSClaudeMCPConfigExtractor,
         )
-        _write_json(self.alice / ".claude.json", {"mcpServers": {"main": {"command": "a"}}, "pad": "x" * 4096})
-        _write_json(self.alice / ".claude" / "mcp.json", {"mcpServers": {"fallback": {"command": "b"}}})
         with mock.patch.object(helpers.Path, "home", return_value=self.alice), _not_elevated(), \
-                mock.patch.object(helpers, "_iter_admin_user_homes", return_value=[]), \
-                mock.patch.object(helpers, "_CLI_CONFIG_MAX_BYTES", 1024):
+                mock.patch.object(helpers, "_iter_admin_user_homes", return_value=[]):
             projects = helpers.extract_dual_path_configs_with_root_support(
                 self.alice / ".claude.json", self.alice / ".claude" / "mcp.json",
                 MacOSClaudeMCPConfigExtractor()._extract_from_config_file)
-        self.assertEqual([s["name"] for p in projects for s in p["mcpServers"]], ["fallback"])
+        return [s["name"] for p in projects for s in p["mcpServers"]]
+
+    def test_unreadable_claude_code_config_gives_way_to_the_fallback(self):
+        main = self.alice / ".claude.json"
+        _write_json(self.alice / ".claude" / "mcp.json", {"mcpServers": {"fallback": {"command": "b"}}})
+        _write_json(main, {"mcpServers": {"main": {"command": "a"}}, "pad": "x" * 4096})
+        self.assertEqual(self._own_home_local_servers(), ["main"])
+        with mock.patch.object(helpers, "_CLI_CONFIG_MAX_BYTES", 1024):
+            self.assertEqual(self._own_home_local_servers(), ["fallback"], "oversize")
+        main.write_text('{"mcpServers": {"ma', encoding="utf-8")
+        self.assertEqual(self._own_home_local_servers(), ["fallback"], "malformed")
+        _write_json(main, {"projects": {}})
+        self.assertEqual(self._own_home_local_servers(), [], "read fine, no servers: fallback stays unused")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs FIFO support")
+    def test_pipe_in_place_of_claude_code_config_gives_way_to_the_fallback(self):
+        _write_json(self.alice / ".claude" / "mcp.json", {"mcpServers": {"fallback": {"command": "b"}}})
+        os.mkfifo(self.alice / ".claude.json")
+        with _must_not_block(self):
+            self.assertEqual(self._own_home_local_servers(), ["fallback"])
 
     def test_own_home_scan_still_follows_a_linked_cli_config(self):
         self._cli(self.bob, ["claude.ai Mine"])

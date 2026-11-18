@@ -2622,6 +2622,13 @@ def extract_dual_path_configs_with_root_support(
         except ImportError:
             pass
 
+    def own_home_projects() -> List[Dict]:
+        projects = extract_from_file_func(preferred_path) if preferred_path.exists() else []
+        # The fallback is for a preferred config that is missing or unreadable, not one read with no servers.
+        if not projects and fallback_path.exists() and _config_unusable(preferred_path):
+            projects = extract_from_file_func(fallback_path)
+        return projects or []
+
     # When running as admin/root, check all users
     admin_homes = _iter_admin_user_homes(is_admin, users_dir)
     if admin_homes:
@@ -2652,24 +2659,10 @@ def extract_dual_path_configs_with_root_support(
         # admin_homes, so re-adding it would double-count (WEB-4673) — skip then.
         import platform as _platform
         if _platform.system() != "Linux" and not _own_home_already_scanned(admin_homes):
-            if _within_config_limit(preferred_path):
-                root_projects = extract_from_file_func(preferred_path)
-                if root_projects:
-                    all_projects.extend(root_projects)
-            elif fallback_path.exists():
-                root_projects = extract_from_file_func(fallback_path)
-                if root_projects:
-                    all_projects.extend(root_projects)
+            all_projects.extend(own_home_projects())
     else:
         # For regular users, check their own home directory
-        if _within_config_limit(preferred_path):
-            user_projects = extract_from_file_func(preferred_path)
-            if user_projects:
-                all_projects.extend(user_projects)
-        elif fallback_path.exists():
-            user_projects = extract_from_file_func(fallback_path)
-            if user_projects:
-                all_projects.extend(user_projects)
+        all_projects.extend(own_home_projects())
     
     return all_projects
 
@@ -2750,12 +2743,9 @@ def _scans_another_users_home(home: Path) -> bool:
     return elevated or os.path.realpath(str(home)) != os.path.realpath(str(Path.home()))
 
 
-def _within_config_limit(config_path: Path) -> bool:
-    """True when `config_path` exists and is small enough to read; otherwise the fallback config is used."""
-    try:
-        return config_path.stat().st_size <= _CLI_CONFIG_MAX_BYTES
-    except OSError:
-        return False
+def _config_unusable(config_path: Path) -> bool:
+    """True when `config_path` is missing or cannot be read as Claude Code's config."""
+    return not config_path.exists() or read_claude_code_config(config_path) is None
 
 
 def read_claude_code_config(config_path: Path) -> Any:

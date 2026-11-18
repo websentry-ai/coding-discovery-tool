@@ -7,18 +7,29 @@ from typing import Dict, Iterator, List, Pattern, Tuple
 # Kept byte-identical in coding-discovery-tool and ai-gateway-data; bump RULES_VERSION on any change.
 RULES_VERSION = 4
 
-# A quoted value that is a placeholder, a shell variable or a template, not a secret.
+# Inside a URL: a query value of 8+ characters with a digit, or a 16-character run mixing letters and digits.
+_URL_TOKEN = (
+    r'(?:\?[^\'"\s#]{0,200}=(?=[^&\'"\s#]{0,200}[0-9])[^&\'"\s#]{8}'
+    r'|(?=[A-Za-z_-]{0,15}[0-9])(?=[0-9_-]{0,15}[A-Za-z])[A-Za-z0-9_-]{16})'
+)
+# A quoted value that is a placeholder, a shell variable, a template or a plain URL, not a secret.
 _PLACEHOLDER = (
     r'(?![<{])(?!\$[({]|\$(?-i:[A-Z_][A-Z0-9_]*)["\'])(?![*xX]+["\'])'
-    r'(?![A-Za-z][A-Za-z0-9+.-]{0,30}://(?![^\'"\s]{0,2000}[A-Za-z0-9_-]{24})[^\'"\s]{0,2000}["\'])'
+    r'(?![A-Za-z][A-Za-z0-9+.-]{0,30}://(?![^\'"\s]{0,2000}' + _URL_TOKEN + r')[^\'"\s]{0,2000}["\'])'
     r'(?!(?:changeme|password|example|placeholder|redacted)["\'])(?!your[_-][^\'"\s]*["\'])'
 )
-# A URL password that is a variable, a template or a stock default, not a secret.
+# A host on the same machine: a loopback address, the Docker host, or a bare name such as a compose service.
+_LOCAL_HOST = (
+    r'(?:127\.0\.0\.1|0\.0\.0\.0|\[::1\]|host\.docker\.internal|(?=[A-Za-z0-9_-]{0,62}[A-Za-z_])[A-Za-z0-9_-]{1,63})'
+    r'(?=[:/?#\s"\'`)\]>,;|*!}&]|\.(?![A-Za-z0-9-])|$)'
+)
+# A URL password that is a template on any host, or a stock default on a local host: not a secret.
 _STOCK_URL_PASSWORD = (
-    r'(?!\$[({]|\$[A-Z_][A-Z0-9_]{0,60}@|<[^>@]{0,60}>@|\{[^}@]{0,60}\}{1,2}@|%\(|%[sdv]@'
-    r'|%[A-Za-z_][A-Za-z0-9_]{0,60}%@|\*{1,60}@)'
+    r'(?!\$\{[A-Za-z_][A-Za-z0-9_]{0,60}(?::?[-=?+][^}@]{0,60})?\}@|\$\([^)@]{0,60}\)@|\$[A-Z_][A-Z0-9_]{0,60}@'
+    r'|<[A-Za-z_][A-Za-z0-9_ .-]{0,60}>@|\{\{? ?[A-Za-z_][A-Za-z0-9_ .|-]{0,60}\}{1,2}@'
+    r'|%\([A-Za-z_][A-Za-z0-9_]{0,60}\)[sd]@|%[sdv]@|%[A-Za-z_][A-Za-z0-9_]{0,60}%@|\*{1,60}@)'
     r'(?!(?i:password|passwd|pass|pwd|secret|changeme|example|test|admin|root|postgres|mysql|mongo|redis|user|username'
-    r'|guest|default|x{3,60}|none|null)@)'
+    r'|guest|default|x{3,60}|none|null)@' + _LOCAL_HOST + r')'
 )
 # A key that names a setting about the secret (its name, URL, TTL...) rather than holding it.
 _DESCRIPTOR_KEY = (
@@ -102,7 +113,8 @@ SECRET_RULES: Tuple[Tuple[str, Pattern, Tuple[Pattern, ...]], ...] = (
     (
         'SECRET-011',
         re.compile(
-            r'(?:mongodb|mysql|postgresql|postgres)://(?P<db_user>[^:@/\s]{1,100}):(?!(?P=db_user)@)'
+            r'(?:mongodb|mysql|postgresql|postgres)://(?P<db_user>[^:@/\s]{1,100}):(?!(?P=db_user)@'
+            + _LOCAL_HOST + r')'
             + _STOCK_URL_PASSWORD + r'[^@\n]{1,200}@'
         ),
         (),
@@ -177,7 +189,10 @@ SECRET_RULES: Tuple[Tuple[str, Pattern, Tuple[Pattern, ...]], ...] = (
     ),
     (
         'SECRET-022',
-        re.compile(r'(?<=://)(?P<url_user>[^\s:@/]*):(?!(?P=url_user)@)' + _STOCK_URL_PASSWORD + r'[^\s/@]+@'),
+        re.compile(
+            r'(?<=://)(?P<url_user>[^\s:@/]*):(?!(?P=url_user)@' + _LOCAL_HOST + r')'
+            + _STOCK_URL_PASSWORD + r'[^\s/@]+@'
+        ),
         (),
     ),
     (

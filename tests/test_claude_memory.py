@@ -29,7 +29,7 @@ EMPTY_BLOCK_HASH = hashlib.sha256(
 SLUG = "-work-shop"
 
 # Must equal the same constant in the other repo (coding-discovery-tool / ai-gateway-data).
-MEMORY_SECRET_RULES_SHA256 = "2953e0c52b64f946082f5d575868e08ff9ed99f51979ffe5c7fe87758f5996c0"
+MEMORY_SECRET_RULES_SHA256 = "1de610f747bca0a1ce64de22de831cab1cd668d295448cf9c5f9050df1de886f"
 
 PRIVATE_KEY_BLOCK = (
     "-----BEGIN RSA PRIVATE KEY-----\n" + "MIIEowIBAAKCAQEA1b2c3d4e5f6g7h8i9j0k1l2m3n4\n" * 3
@@ -86,6 +86,15 @@ SHOULD_MASK = [
     ("Quoted URL carrying a password after a token key", 'token: "https://deploy:hunter2pass9@git.example.com/x"'),
     ("URL password with a percent-encoded character", "postgres://app:%23Xk9mP2qL@db.example.com/app"),
     ("URL password starting with a dollar", "postgres://app:$uperS3cret@db.example.com/app"),
+    ("URL password that only starts like a template", "postgres://app:${x}Rl9!secret@db.example.com/app"),
+    ("Stock URL password on a real host", "postgres://admin:admin@prod-db.corp.example.com/app"),
+    ("Stock URL password on a private IP", "mongodb://root:root@10.0.4.12/app"),
+    ("Same-as-username URL password on a dotted host", "amqp://guest:guest@mq.internal:5672"),
+    ("Stock URL password on a host that only starts with localhost", "postgres://admin:admin@localhost.evil.com/app"),
+    ("URL password that only starts like a command substitution", "postgres://app:$(x)Rl9!secret@db.example.com/app"),
+    ("Quoted URL with a short token in its path", 'token: "https://x.example.com/t/' + "Ab3dE5gH7jK9mN1p" + '"'),
+    ("Quoted URL with a query string after a token key",
+     'token: "https://x.example.com/cb?auth=' + "Ab3dE5gH7jK9mN1p" + '"'),
     ("Quoted webhook URL with a long token in its path",
      'secret: "https://discord.com/api/webhooks/123456789012345678/'
      + "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abcd" + '"'),
@@ -120,7 +129,12 @@ SHOULD_NOT_MASK = [
     ("Local database URL with a stock password", "postgres://postgres:postgres@localhost:5432/app"),
     ("Database URL with a placeholder password", "mysql://user:password@db:3306/app"),
     ("Database URL with variables", "postgres://${DB_USER}:${DB_PASS}@db.internal:5432/app"),
-    ("URL with the password same as the username", "amqp://guest:guest@mq.internal:5672"),
+    ("URL with the password same as the username on a bare host name", "amqp://guest:guest@mq:5672"),
+    ("Local stock URL at the end of a sentence", "Use postgres://postgres:postgres@localhost."),
+    ("Local stock URL in bold", "**postgres://postgres:postgres@localhost**"),
+    ("Quoted token endpoint with a hyphenated tenant",
+     'token: "https://acme-corporation.okta.com/oauth2/default/v1/token"'),
+    ("Quoted token endpoint with a short query value", 'token: "https://oauth2.googleapis.com/token?alt=json"'),
     ("Quoted URL after a token key", 'token: "https://oauth2.googleapis.com/token"'),
     ("URL password that is a shell variable", "postgres://app:$DB_PASS@db/app"),
     ("URL password that is an angle-bracket placeholder", "postgres://app:<password>@db/app"),

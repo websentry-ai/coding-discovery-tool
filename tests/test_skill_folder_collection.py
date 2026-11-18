@@ -31,7 +31,8 @@ class SkillFolderTestCase(unittest.TestCase):
         if isinstance(data, bytes):
             path.write_bytes(data)
         else:
-            path.write_text(data, encoding="utf-8")
+            # Exact bytes: write_text would turn \n into \r\n on Windows, and the collector sends the real bytes.
+            path.write_bytes(data.encode("utf-8"))
         return path
 
     def collect(self):

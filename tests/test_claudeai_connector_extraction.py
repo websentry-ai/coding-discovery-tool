@@ -779,6 +779,19 @@ class ClaudeAISameOrgSessionConnectorsTest(unittest.TestCase):
         with mock.patch.object(helpers, "_SESSION_MAX_FILES_READ", 2):
             self.assertEqual(self._names("Claude Cowork"), STALE + ["claude.ai Slack"])
 
+    def test_unreadable_session_among_readable_ones_leaves_todays_list(self):
+        unreadable = {"oversize": json.dumps({"remoteMcpServersConfig": [], "pad": "x" * (6 * 1024 * 1024)}),
+                      "cut off": '{"remoteMcpServersConfig": [{"na'}
+        for label, content in unreadable.items():
+            with self.subTest(label), tempfile.TemporaryDirectory() as fresh:
+                self.home, self.app_dir = Path(fresh), helpers._claude_app_support_dir(Path(fresh))
+                with mock.patch.object(Path, "home", return_value=self.home):
+                    self._signed_in()
+                    self._session([_connector("Slack")], age_days=5)
+                    newest = self._session([_connector("Notion")], age_days=0, name="local_newest.json")
+                    newest.write_text(content, encoding="utf-8")
+                    self.assertEqual(self._names("Claude Cowork"), STALE + ["claude.ai Slack"])
+
     def test_cap_keeps_the_latest_used_sessions_not_the_latest_saved(self):
         self._signed_in()
         org_dir = self.app_dir / "claude-code-sessions" / "acct-1" / "org-1"
@@ -909,7 +922,7 @@ class ClaudeAISameOrgRootScanTest(unittest.TestCase):
             os.symlink(bob_file, org / "local_x.json")
         except (OSError, NotImplementedError):
             self.skipTest("cannot create symlinks here")
-        self.assertEqual(self._scan(), {"alice": ["claude.ai Mine"]})
+        self.assertEqual(self._scan(), {"alice": STALE + ["claude.ai Mine"]})
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "needs FIFO support")
     def test_planted_fifo_does_not_hang_the_scan(self):

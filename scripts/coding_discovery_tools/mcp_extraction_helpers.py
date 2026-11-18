@@ -3140,7 +3140,10 @@ def _same_org_desktop_session_servers(home: Path) -> List[Dict[str, Any]]:
     listings: List[Tuple[float, List[Any]]] = []
     for mtime, file, boundary_real in candidates:
         data = _read_bounded_json(file, boundary_real)
-        configured = data.get("remoteMcpServersConfig") if isinstance(data, dict) else None
+        # An unread session may hold a connector the others lack, so the rule is skipped.
+        if not isinstance(data, dict):
+            return []
+        configured = data.get("remoteMcpServersConfig")
         if not isinstance(configured, list):
             continue
         last_used = _session_last_used(data, mtime)

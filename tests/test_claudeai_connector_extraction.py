@@ -17,6 +17,7 @@ are attached when present and omitted otherwise.
 import json
 import os
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -53,10 +54,11 @@ class ClaudeAINameSourcesTest(unittest.TestCase):
         self.home = Path(self._tmp.name)
         self.claude_dir = self.home / ".claude"
         self.claude_dir.mkdir()
-        # Default to a platform whose session dir is absent in the temp home.
-        patcher = mock.patch.object(helpers.platform, "system", return_value="Darwin")
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        # Default to a platform whose session dir is absent in the temp home, scanned as the user's own home.
+        for patcher in (mock.patch.object(helpers.platform, "system", return_value="Darwin"),
+                        mock.patch.object(helpers.Path, "home", return_value=self.home)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.addCleanup(self._tmp.cleanup)
 
     def _extract(self):
@@ -162,9 +164,10 @@ class ClaudeAISessionToolsTest(unittest.TestCase):
             self.home / "Library" / "Application Support" / "Claude"
             / "local-agent-mode-sessions"
         )
-        patcher = mock.patch.object(helpers.platform, "system", return_value="Darwin")
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for patcher in (mock.patch.object(helpers.platform, "system", return_value="Darwin"),
+                        mock.patch.object(helpers.Path, "home", return_value=self.home)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.addCleanup(self._tmp.cleanup)
         _write_json(self.home / ".claude.json", {
             "claudeAiMcpEverConnected": ["claude.ai Gmail", "claude.ai Spotify"],
@@ -669,6 +672,141 @@ class ClaudeAIDesktopSessionRootScanTest(unittest.TestCase):
         os.mkfifo(org / "local_x.json")
         self._sessions(self.bob, ["Notion"])
         self.assertEqual(self._scan(), {"bob": ["claude.ai Notion"]})
+
+
+def _finishes(test, work, seconds=15):
+    """Run `work` on a daemon thread, so a read that blocks fails the test instead of hanging the run."""
+    result = {}
+    worker = threading.Thread(target=lambda: result.setdefault("value", work()), daemon=True)
+    worker.start()
+    worker.join(timeout=seconds)
+    test.assertFalse(worker.is_alive(), "a planted file hung the scan")
+    return result.get("value")
+
+
+class ClaudeAICliReadersContainmentTest(unittest.TestCase):
+    """The CLI-side readers skip planted FIFOs, links into another home and oversize files."""
+
+    setUp = ClaudeAIDesktopSessionRootScanTest.setUp
+    GMAIL_ONLY = [{"name": "claude.ai Gmail", "scope": "claudeai"}]
+
+    def _cli(self, home, names=("claude.ai Gmail",)):
+        _write_json(home / ".claude.json", {"claudeAiMcpEverConnected": list(names),
+                                            "oauthAccount": {"accountUuid": "a"}})
+
+    def _org(self, home):
+        org = helpers._claude_app_support_dir(home) / "claude-code-sessions" / "a" / "o"
+        org.mkdir(parents=True, exist_ok=True)
+        return org
+
+    def _link(self, target, link):
+        link.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.symlink(target, link)
+        except (OSError, NotImplementedError):
+            self.skipTest("cannot create symlinks here")
+
+    def _servers(self, home):
+        projects = []
+        helpers.extract_claudeai_mcp_servers(home / ".claude", projects)
+        return [s for p in projects for s in p["mcpServers"]]
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs FIFO support")
+    def test_planted_fifo_session_file_does_not_hang_when_cli_names_exist(self):
+        self._cli(self.alice)
+        os.mkfifo(self._org(self.alice) / "local_x.json")
+        for scanner_home in (self.root_home, self.alice):
+            with self.subTest(scanner_home.name), mock.patch.object(helpers.Path, "home", return_value=scanner_home):
+                self.assertEqual(_finishes(self, lambda: self._servers(self.alice)), self.GMAIL_ONLY)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs FIFO support")
+    def test_fifo_in_place_of_a_config_file_does_not_hang(self):
+        app_dir = helpers._claude_app_support_dir(self.alice)
+        (self.alice / ".claude").mkdir()
+        app_dir.mkdir(parents=True)
+        for fifo in (self.alice / ".claude.json", self.alice / ".claude" / "mcp-needs-auth-cache.json",
+                     app_dir / "config.json"):
+            os.mkfifo(fifo)
+        for scanner_home in (self.root_home, self.alice):
+            with self.subTest(scanner_home.name), mock.patch.object(helpers.Path, "home", return_value=scanner_home):
+                self.assertEqual(_finishes(self, lambda: self._servers(self.alice)), [])
+                self.assertIs(_finishes(self, lambda: helpers.claude_cli_and_desktop_share_account(self.alice)), False)
+
+    def test_session_file_linked_into_another_home_contributes_nothing(self):
+        self._cli(self.alice)
+        self._cli(self.bob)
+        bob_file = _write_session(self._org(self.bob), "local_b.json", [_connector("Gmail", tools=SLACK_TOOLS)],
+                                  self.now - 60)
+        self._link(bob_file, self._org(self.alice) / "local_x.json")
+        self.assertIn("scan", self._servers(self.bob)[0])
+        self.assertEqual(self._servers(self.alice), self.GMAIL_ONLY)
+
+    def test_session_folder_linked_into_another_home_contributes_nothing(self):
+        self._cli(self.alice)
+        _write_session(self._org(self.bob), "local_b.json", [_connector("Gmail", tools=SLACK_TOOLS)], self.now - 60)
+        self._link(helpers._claude_app_support_dir(self.bob) / "claude-code-sessions",
+                   helpers._claude_app_support_dir(self.alice) / "claude-code-sessions")
+        self.assertEqual(self._servers(self.alice), self.GMAIL_ONLY)
+
+    def test_config_files_linked_into_another_home_are_not_read(self):
+        self._cli(self.bob, ["claude.ai BobSecret"])
+        bob_cache = _write_json(self.bob / ".claude" / "mcp-needs-auth-cache.json",
+                                {"claude.ai BobPending": {"timestamp": 1}})
+        bob_desktop = _write_json(helpers._claude_app_support_dir(self.bob) / "config.json",
+                                  {"lastKnownAccountUuid": "a"})
+        self._link(self.bob / ".claude.json", self.alice / ".claude.json")
+        self._link(bob_cache, self.alice / ".claude" / "mcp-needs-auth-cache.json")
+        self._link(bob_desktop, helpers._claude_app_support_dir(self.alice) / "config.json")
+        self.assertTrue(helpers.claude_cli_and_desktop_share_account(self.bob))
+        self.assertFalse(helpers.claude_cli_and_desktop_share_account(self.alice))
+        self.assertEqual(self._servers(self.alice), [])
+
+    def test_own_home_scan_still_reads_a_config_linked_inside_the_home(self):
+        dotfile = _write_json(self.alice / "dotfiles" / "claude.json",
+                              {"claudeAiMcpEverConnected": ["claude.ai Gmail"]})
+        self._link(dotfile, self.alice / ".claude.json")
+        with mock.patch.object(helpers.Path, "home", return_value=self.alice), \
+             mock.patch.object(helpers.os, "geteuid", return_value=501, create=True):
+            self.assertEqual(self._servers(self.alice), self.GMAIL_ONLY)
+
+    def test_oversize_files_are_skipped(self):
+        self._cli(self.alice)
+        org = self._org(self.alice)
+        _write_session(org, "local_small.json", [_connector("Gmail", tools=SLACK_TOOLS)], self.now - 3600)
+        _write_session(org, "local_big.json",
+                       [_connector("Gmail", tools=[{"name": "x", "description": "d" * (6 * 1024 * 1024)}])],
+                       self.now - 60)
+        tools = self._servers(self.alice)[0]["scan"]["tools"]
+        self.assertEqual([t["name"] for t in tools], ["send_message"])
+        with mock.patch.object(helpers, "_CLI_CONFIG_MAX_BYTES", 16):
+            self.assertEqual(self._servers(self.alice), [])
+
+    def test_cli_config_over_the_session_file_size_cap_is_still_read(self):
+        _write_json(self.alice / ".claude.json", {"claudeAiMcpEverConnected": ["claude.ai Gmail"],
+                                                  "projects": "x" * (6 * 1024 * 1024)})
+        self.assertEqual(self._servers(self.alice), self.GMAIL_ONLY)
+
+    def test_only_the_newest_session_files_up_to_the_cap_are_read(self):
+        self._cli(self.alice, ["claude.ai Gmail", "claude.ai Slack"])
+        org = self._org(self.alice)
+        _write_session(org, "local_new.json", [_connector("Gmail", tools=SLACK_TOOLS)], self.now - 60)
+        _write_session(org, "local_old.json", [_connector("Slack", tools=SLACK_TOOLS)], self.now - 3600)
+        self.assertEqual(["scan" in s for s in self._servers(self.alice)], [True, True])
+        with mock.patch.object(helpers, "_SESSION_MAX_FILES", 1):
+            self.assertEqual(["scan" in s for s in self._servers(self.alice)], [True, False])
+
+    def test_contained_and_own_home_scans_report_the_same_for_ordinary_files(self):
+        self._cli(self.alice, ["claude.ai Gmail", "claude.ai Slack"])
+        _write_json(self.alice / ".claude" / "mcp-needs-auth-cache.json", {"claude.ai Notion": {"timestamp": 1}})
+        _write_json(helpers._claude_app_support_dir(self.alice) / "config.json", {"lastKnownAccountUuid": "a"})
+        _write_session(self._org(self.alice), "local_a.json", [_connector("Slack", tools=SLACK_TOOLS)], self.now - 60)
+        contained = (self._servers(self.alice), helpers.claude_cli_and_desktop_share_account(self.alice))
+        with mock.patch.object(helpers.Path, "home", return_value=self.alice):
+            own_home = (self._servers(self.alice), helpers.claude_cli_and_desktop_share_account(self.alice))
+        self.assertEqual(contained, own_home)
+        self.assertEqual([s["name"] for s in contained[0]], ["claude.ai Notion", "claude.ai Gmail", "claude.ai Slack"])
+        self.assertEqual(contained[0][2]["scan"]["tools"], [{"name": "send_message", "description": "Send."}])
+        self.assertIs(contained[1], True)
 
 
 if __name__ == "__main__":

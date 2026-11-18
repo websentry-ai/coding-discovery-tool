@@ -6,6 +6,7 @@ symlinks, junctions and hard links inside the folder are never followed.
 """
 import base64
 import copy
+import functools
 import hashlib
 import logging
 import os
@@ -74,13 +75,36 @@ def _homes_parents() -> List[Path]:
     return parents
 
 
-def _is_home_or_above(root: Path) -> bool:
-    """True for a user's home, a folder holding one, or a top-level folder under /Users, /home or C:\\Users."""
+@functools.lru_cache(maxsize=1)
+def _machine_user_homes() -> frozenset:
+    """Every account's home on this machine (pwd, or Windows' profile list), so an admin scan guards each user's."""
+    homes = set()
     try:
-        home = Path(os.path.realpath(str(Path.home())))
+        if os.name == "nt":
+            from .utils import windows_user_homes  # pylint: disable=import-outside-toplevel
+            homes.update(windows_user_homes().values())
+        else:
+            import pwd  # pylint: disable=import-outside-toplevel
+            homes.update(Path(entry.pw_dir) for entry in pwd.getpwall() if entry.pw_dir not in ("", "/"))
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logger.debug(f"Could not list user homes: {e}")
+    real = set()
+    for home in homes:
+        try:
+            real.add(Path(os.path.realpath(str(home))))
+        except (OSError, ValueError):
+            continue
+    return frozenset(h for h in real if h != Path(h.anchor))
+
+
+def _is_home_or_above(root: Path) -> bool:
+    """True for any user's home, a folder holding one, or a top-level folder under /Users, /home or C:\\Users."""
+    homes = set(_machine_user_homes())
+    try:
+        homes.add(Path(os.path.realpath(str(Path.home()))))
     except (OSError, RuntimeError, ValueError):
-        home = None
-    if home is not None and (root == home or root in home.parents):
+        pass
+    if any(root == home or root in home.parents for home in homes):
         return True
     if root in (Path("/root"), Path("/var/root"), Path("/private/var/root")):
         return True

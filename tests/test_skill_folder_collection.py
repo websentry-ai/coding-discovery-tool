@@ -250,6 +250,17 @@ class TestContainment(SkillFolderTestCase):
         with patch.object(sf.Path, "home", return_value=self.home):
             self.assertIsNone(sf.collect_skill_files(link / "SKILL.md"))
 
+    def test_a_skill_folder_linked_to_another_users_home_outside_users_is_not_walked(self):
+        # An admin scan runs as root, so Path.home() is root's: every account's home must be guarded, NFS ones too.
+        other = Path(os.path.realpath(self._tmp.name)) / "nfs" / "bob"
+        (other / ".aws").mkdir(parents=True)
+        (other / "SKILL.md").write_text("not really a skill")
+        (other / ".aws" / "credentials").write_text("[default]\naws_secret_access_key=FAKE\n")
+        link = self.home / ".claude" / "skills" / "bobs-home"
+        os.symlink(other, link)
+        with patch.object(sf, "_machine_user_homes", return_value=frozenset({other})):
+            self.assertIsNone(sf.collect_skill_files(link / "SKILL.md"))
+
     def test_a_folder_holding_users_homes_is_not_walked(self):
         for homes in ("/Users", "/home"):
             with self.subTest(homes=homes):

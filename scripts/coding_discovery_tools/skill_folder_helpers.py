@@ -33,8 +33,12 @@ NOT_WALKED_NAME = "(not walked)"
 MAX_NOT_WALKED_LISTED = 50
 BINARY_HEAD_BYTES = 512  # what the backend reads to tell an image from an executable
 _SNIFF_BYTES = 8192  # a NUL in the first bytes marks a file as binary
-MAX_HASHED_FILE_SIZE = 8 * 1024 * 1024  # bigger files are listed without a sha256
+MAX_HASHED_FILE_SIZE = 8 * 1024 * 1024  # bigger files get a change fingerprint instead of a full sha256
 MAX_HASHED_BYTES_PER_FOLDER = 64 * 1024 * 1024
+_FINGERPRINT_EDGE_BYTES = 1024 * 1024  # how much of each end of an unhashed file goes into its fingerprint
+MAX_DIR_ENTRIES = 10_000  # entries read from one folder; a bigger folder is marked as not walked
+MAX_EXAMINED_ENTRIES = 50_000  # entries looked at in the whole skill folder, files and folders alike
+_DEADLINE_CHECK_EVERY = 256  # entries between time checks while a folder is read
 MAX_FOLDER_DEPTH = 8
 FOLDER_TIME_BUDGET_SECONDS = 3.0  # past this the rest of the folder is listed by name only
 # Directories that hold tooling or dependencies, not the skill's own files.
@@ -115,6 +119,29 @@ def _is_home_or_above(root: Path) -> bool:
     return any(root.parent == parent or root == parent for parent in _homes_parents())
 
 
+def _home_of(path: Path, homes) -> Optional[Path]:
+    """The account home a path sits in (the deepest one, for nested homes), or None."""
+    inside = [home for home in homes if path == home or home in path.parents]
+    return max(inside, key=lambda home: len(home.parts)) if inside else None
+
+
+def _crosses_home(found: Path, root: Path) -> bool:
+    """True when a link anywhere on the path moved the folder into a different account's home than it was found in."""
+    homes = set(_machine_user_homes())
+    try:
+        homes.add(Path(os.path.realpath(str(Path.home()))))
+    except (OSError, RuntimeError, ValueError):
+        pass
+    # The found path is resolved by its own home's real name, so /var vs /private/var style aliases still match.
+    found_home = _home_of(Path(os.path.abspath(str(found))), {Path(os.path.abspath(str(h))) for h in homes} | homes)
+    real_home = _home_of(root, homes)
+    if real_home is None:
+        return False
+    if found_home is None:
+        return True
+    return Path(os.path.realpath(str(found_home))) != real_home
+
+
 def _skill_root(skill_md: Path) -> Optional[Path]:
     """The real folder of a SKILL.md, or None when it is too broad to walk (a drive, or a user's home or above)."""
     try:
@@ -123,6 +150,9 @@ def _skill_root(skill_md: Path) -> Optional[Path]:
         return None
     # A skill folder linked to a home would upload that home's files, so it is never walked.
     if root == Path(root.anchor) or len(root.parts) < 3 or _is_home_or_above(root) or not root.is_dir():
+        return None
+    # Nor one a linked parent folder moved into another account's home: that user's files are not this report's.
+    if _crosses_home(skill_md.parent, root):
         return None
     return root
 
@@ -133,24 +163,40 @@ def _not_walked(rel_dir: str) -> Dict:
             "truncated": True}
 
 
+def _read_dir(path: str, deadline: float, room: int):
+    """A folder's entries sorted by name, and whether reading stopped early (entry cap, examined cap or time)."""
+    batch = []
+    with os.scandir(path) as entries:
+        for n, entry in enumerate(entries):
+            if n >= min(MAX_DIR_ENTRIES, room) or (n and n % _DEADLINE_CHECK_EVERY == 0 and time.monotonic() >= deadline):
+                return sorted(batch, key=lambda e: e.name), True
+            batch.append(entry)
+    return sorted(batch, key=lambda e: e.name), False
+
+
 def _list_files(root: Path, deadline: float) -> List[Dict]:
     """Regular files under root (relative POSIX paths and sizes), never following a link; folders left unread are named."""
     listed: List[Dict] = []
-    unwalked: List[str] = []  # folders past the depth, count or time limit
+    unwalked: List[str] = []  # folders past the depth, count, size or time limit
     stack = [("", 0)]
+    examined = 0
     while stack:
-        if len(listed) >= MAX_WALKED_FILES or time.monotonic() >= deadline:
+        if len(listed) >= MAX_WALKED_FILES or examined >= MAX_EXAMINED_ENTRIES or time.monotonic() >= deadline:
             unwalked.extend(rel_dir for rel_dir, _ in stack)
             break
         rel_dir, depth = stack.pop()
         try:
-            with os.scandir(os.path.join(str(root), rel_dir)) as entries:
-                entries = sorted(entries, key=lambda e: e.name)
+            # Read lazily and bounded: a folder with a million entries must not stall the scan or fill memory.
+            entries, cut = _read_dir(os.path.join(str(root), rel_dir), deadline, MAX_EXAMINED_ENTRIES - examined)
         except OSError:
             unwalked.append(rel_dir)
             continue
+        examined += len(entries)
+        if cut:
+            unwalked.append(rel_dir)
         for n, entry in enumerate(entries):
-            if len(listed) >= MAX_WALKED_FILES:
+            out_of_time = n % _DEADLINE_CHECK_EVERY == 0 and n and time.monotonic() >= deadline
+            if len(listed) >= MAX_WALKED_FILES or out_of_time:
                 # Cut off inside this folder: what it has left goes unread.
                 if any(not is_symlink_or_junction(e.path) for e in entries[n:]):
                     unwalked.append(rel_dir)
@@ -180,6 +226,16 @@ def _list_files(root: Path, deadline: float) -> List[Dict]:
     return listed + [_not_walked(rel_dir) for rel_dir in sorted(set(unwalked))[:MAX_NOT_WALKED_LISTED]]
 
 
+def _fingerprint(handle, st) -> str:
+    """A change marker for a file too big to hash whole: its size, modified time and the bytes at both ends."""
+    digest = hashlib.sha256(f"unbound-partial-v1:{st.st_size}:{st.st_mtime_ns}:".encode())
+    handle.seek(0)
+    digest.update(handle.read(_FINGERPRINT_EDGE_BYTES))
+    handle.seek(max(st.st_size - _FINGERPRINT_EDGE_BYTES, 0))
+    digest.update(handle.read(_FINGERPRINT_EDGE_BYTES))
+    return digest.hexdigest()
+
+
 def _read_file(root: Path, item: Dict, text_room: int, hash_room: int) -> int:
     """Fill item's sha256, and its content or binary head, from one contained read; returns the bytes hashed."""
     opened = _open_checked(root / item["path"], root, allow_symlink=False)
@@ -203,11 +259,12 @@ def _read_file(root: Path, item: Dict, text_room: int, hash_room: int) -> int:
                 kept += chunk[:keep - len(kept)]
             if not at_end:
                 at_end = not handle.read(1)
+            # Too big to hash whole: still give it a value that changes when the file does, so an edit past
+            # what is sent makes a new upload and a new version instead of keeping the old assessment.
+            item["sha256"] = digest.hexdigest() if hash_it else _fingerprint(handle, st)
     except OSError:
         item["truncated"] = True
         return 0
-    if hash_it:
-        item["sha256"] = digest.hexdigest()
     if b"\x00" in kept[:_SNIFF_BYTES]:
         item["binary"] = True
         item["head"] = base64.b64encode(bytes(kept[:BINARY_HEAD_BYTES])).decode("ascii")
@@ -239,8 +296,15 @@ def collect_skill_files(skill_md: Path) -> Optional[List[Dict]]:
             if posixpath.basename(item["path"]) == NOT_WALKED_NAME and item.get("truncated"):
                 continue  # a folder left unread, not a file to open
             if time.monotonic() >= deadline:
-                # Listed by name only: the backend scores a folder it could not fully read with care.
+                # Listed by name only: the backend scores a folder it could not fully read with care. A stat-based
+                # value still changes on an edit, so the next run re-uploads it instead of keeping the old result.
                 item["truncated"] = True
+                try:
+                    st = os.lstat(str(root / item["path"]))
+                    item["sha256"] = hashlib.sha256(
+                        f"unbound-stat-v1:{st.st_size}:{st.st_mtime_ns}:{st.st_ino}".encode()).hexdigest()
+                except OSError:
+                    pass
                 continue
             room = min(MAX_FILE_CONTENT_CHARS, text_budget) if with_text < MAX_FILES_WITH_CONTENT else 0
             hash_budget -= _read_file(root, item, room, hash_budget)

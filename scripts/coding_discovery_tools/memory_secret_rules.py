@@ -4,8 +4,8 @@ from bisect import bisect_right
 from itertools import accumulate
 from typing import Dict, Iterator, List, Pattern, Tuple
 
-# Kept byte-identical in coding-discovery-tool and ai-gateway-data; bump RULES_VERSION on any change.
-RULES_VERSION = 3
+# Bump RULES_VERSION on any change; a `value` group marks the secret inside a match, none means the whole match.
+RULES_VERSION = 4
 
 # A quoted value that is a placeholder, a shell variable or a template, not a secret.
 _PLACEHOLDER = (
@@ -93,7 +93,7 @@ SECRET_RULES: Tuple[Tuple[str, Pattern, Tuple[Pattern, ...]], ...] = (
     ),
     (
         'SECRET-011',
-        re.compile(r'(?:mongodb|mysql|postgresql|postgres)://[^:@/\s]{1,100}:[^@\n]{1,200}@'),
+        re.compile(r'(?:mongodb|mysql|postgresql|postgres)://[^:@/\s]{1,100}:(?P<value>[^@\n]{1,200})@'),
         (),
     ),
     (
@@ -119,12 +119,8 @@ SECRET_RULES: Tuple[Tuple[str, Pattern, Tuple[Pattern, ...]], ...] = (
     (
         'SECRET-016',
         re.compile(
-            r'(?:'
-            r'(?:password|passwd|pwd)["\']?\s*[=:]\s*["\']' + _PLACEHOLDER + r'[^\'"\s]{8,}["\']'
-            r'|(?:api[_-]?key|apikey)["\']?\s*[=:]\s*["\']' + _PLACEHOLDER + r'[^\'"\s]{16,}["\']'
-            r'|(?:secret|token|auth[_-]?token|access[_-]?token)["\']?\s*[=:]\s*["\']' + _PLACEHOLDER
-            + r'[^\'"\s]{16,}["\']'
-            r')',
+            r'(?:(?P<short>password|passwd|pwd)|api[_-]?key|apikey|secret|token|auth[_-]?token|access[_-]?token)'
+            r'["\']?\s*[=:]\s*["\']' + _PLACEHOLDER + r'(?P<value>(?(short)[^\'"\s]{8,}|[^\'"\s]{16,}))["\']',
             re.IGNORECASE
         ),
         (),
@@ -142,7 +138,7 @@ SECRET_RULES: Tuple[Tuple[str, Pattern, Tuple[Pattern, ...]], ...] = (
     (
         'SECRET-019',
         re.compile(
-            r'(?:azure|cognitive|openai)[_-]?(?:api)?[_-]?key[\'"]?\s*[:=]\s*[\'"]?([a-f0-9]{32})[\'"]?',
+            r'(?:azure|cognitive|openai)[_-]?(?:api)?[_-]?key[\'"]?\s*[:=]\s*[\'"]?(?P<value>[a-f0-9]{32})[\'"]?',
             re.IGNORECASE
         ),
         (),
@@ -159,46 +155,51 @@ SECRET_RULES: Tuple[Tuple[str, Pattern, Tuple[Pattern, ...]], ...] = (
             + r'|(?:secret|token|api_key|apikey)' + _KEY_TAIL + r'(?=[^\s\'"]{0,200}[A-Za-z]|[^\s\'"]{20,}))'
             r'(?=[^\s\'"]{0,200}[0-9])'
             r'(?!(?:none|null|true|false|required|optional|string|changeme)(?![^\s\'"])|xxx)'
-            r'[^\s\'"]{8,}',
+            r'(?P<value>[^\s\'"]{8,})',
             re.IGNORECASE
         ),
         (),
     ),
     (
         'SECRET-022',
-        re.compile(r'(?<=://)[^\s:@/]*:[^\s/@]+@'),
+        re.compile(r'(?<=://)[^\s:@/]*:(?P<value>[^\s/@]+)@'),
         (),
     ),
     (
         'SECRET-023',
         re.compile(
-            r'[?&](?:(?:token|access_token|api_key|apikey|sig|signature|secret|password|x-amz-signature'
-            r'|x-goog-signature)=[^&\s#]{8,}|key=(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
-            r'|(?=[A-Za-z0-9_]{0,200}[0-9])[A-Za-z0-9_]{20,}(?![A-Za-z0-9_-])'
+            r'[?&](?:(?P<plain>token|access_token|api_key|apikey|sig|signature|secret|password|x-amz-signature'
+            r'|x-goog-signature)|key)=(?P<value>(?(plain)[^&\s#]{8,}|(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}'
+            r'-[0-9a-f]{12}|(?=[A-Za-z0-9_]{0,200}[0-9])[A-Za-z0-9_]{20,}(?![A-Za-z0-9_-])'
             r'|(?-i:(?=[A-Za-z0-9_-]{0,200}[0-9])(?=[A-Za-z0-9_-]{0,200}[a-z])(?=[A-Za-z0-9_-]{0,200}[A-Z]))'
-            r'[A-Za-z0-9_-]{24,}(?![A-Za-z0-9_-])))',
+            r'[A-Za-z0-9_-]{24,}(?![A-Za-z0-9_-]))))',
             re.IGNORECASE
         ),
         (),
     ),
     (
         'SECRET-024',
-        re.compile(r'\b(?i:bearer)[ \t]+(?=[A-Za-z0-9._~+/=-]{0,200}[0-9])[A-Za-z0-9._~+/=-]{20,}'),
+        re.compile(r'\b(?i:bearer)[ \t]+(?=[A-Za-z0-9._~+/=-]{0,200}[0-9])(?P<value>[A-Za-z0-9._~+/=-]{20,})'),
         (),
     ),
 )
 
 
 def _rule_findings(rule: Tuple[str, Pattern, Tuple[Pattern, ...]], content: str,
-                   line_offsets: List[int]) -> Iterator[Tuple[str, int]]:
+                   line_offsets: List[int]) -> Iterator[Dict]:
     rule_id, pattern, _ = rule
     for match in pattern.finditer(content):
-        yield rule_id, bisect_right(line_offsets, match.start())
+        start, end = match.span()
+        value_start, value_end = match.span('value') if 'value' in pattern.groupindex else (-1, -1)
+        if value_start < 0 or value_start >= value_end:
+            value_start, value_end = start, end
+        yield {"rule_id": rule_id, "line": bisect_right(line_offsets, start), "start": start, "end": end,
+               "value_start": value_start, "value_end": value_end}
 
 
 def find_secrets(content: str) -> List[Dict]:
-    """Return one {rule_id, line} finding (1-based line) per rule and line with a secret match."""
+    """Return one finding per secret match, sorted by start: rule_id, 1-based line, and str-index spans."""
     lines = content.split('\n')
     line_offsets = list(accumulate((len(line) + 1 for line in lines[:-1]), initial=0))
-    found = dict.fromkeys(finding for rule in SECRET_RULES for finding in _rule_findings(rule, content, line_offsets))
-    return [{"rule_id": rule_id, "line": line} for rule_id, line in found]
+    found = [finding for rule in SECRET_RULES for finding in _rule_findings(rule, content, line_offsets)]
+    return sorted(found, key=lambda finding: finding["start"])

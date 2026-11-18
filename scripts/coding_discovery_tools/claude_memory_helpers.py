@@ -37,7 +37,7 @@ MAX_FLAGGED_FILES_PER_FOLDER = 50
 MAX_MEMORY_CONTENT_BYTES = 2 * 1024 * 1024
 MAX_URL_HOSTS_PER_FILE = 50
 MAX_URL_HOSTS_PER_FOLDER = 200
-MAX_FINDINGS_PER_FILE = 100
+MAX_FINDINGS_PER_FILE = 500
 MAX_CACHE_ENTRIES_PER_USER = 50000
 
 _URL = re.compile(r"https?://[^\s<>\"'`)\]]+", re.IGNORECASE)
@@ -48,6 +48,14 @@ def memory_scan_enabled(scan_start_response: Dict) -> bool:
     """True only when the scan-start response body carries memory_scan_enabled: true."""
     try:
         return json.loads(scan_start_response.get("body") or "").get("memory_scan_enabled") is True
+    except Exception:
+        return False
+
+
+def memory_url_scan_enabled(scan_start_response: Dict) -> bool:
+    """True only when the scan-start response body carries memory_url_scan_enabled: true."""
+    try:
+        return json.loads(scan_start_response.get("body") or "").get("memory_url_scan_enabled") is True
     except Exception:
         return False
 
@@ -240,6 +248,14 @@ def _markdown_files(folder: Path, deadline: float) -> Iterator[Path]:
                 yield directory / name
 
 
+_FINDING_INT_KEYS = ("line", "start", "end", "value_start", "value_end")
+
+
+def _sendable(entry: Dict, url_scan: bool) -> bool:
+    """True when a file is uploaded: it has findings, or URL scanning is on and it has URL hosts."""
+    return bool(entry["findings"] or (url_scan and entry["url_hosts"]))
+
+
 def _cached_verdict(entry: object) -> Dict:
     """entry when it has the shape this module writes, else {} so the file is rescanned."""
     try:
@@ -247,16 +263,20 @@ def _cached_verdict(entry: object) -> Dict:
             isinstance(entry["size"], int) and isinstance(entry["mtime"], int) and isinstance(entry["sha256"], str)
             and isinstance(entry["url_hosts"], list) and isinstance(entry["findings"], list)
             and all(isinstance(host, str) for host in entry["url_hosts"])
-            and all(isinstance(finding["rule_id"], str) and isinstance(finding["line"], int)
+            and all(isinstance(finding["rule_id"], str)
+                    and all(isinstance(finding[key], int) for key in _FINDING_INT_KEYS)
+                    and 0 <= finding["start"] <= finding["value_start"] < finding["value_end"] <= finding["end"]
                     for finding in entry["findings"])
+            and isinstance(entry.get("findings_truncated", False), bool)
         )
     except (KeyError, TypeError):
         return {}
     return entry if well_formed else {}
 
 
-def _check_file(path: Path, folder: Path, cached_entry: object) -> Optional[Tuple[Dict, Optional[Dict]]]:
-    """(cache entry, payload item or None for an unsent topic file) for one memory file; None when unreadable."""
+def _check_file(path: Path, folder: Path, cached_entry: object,
+                url_scan: bool = False) -> Optional[Tuple[Dict, Optional[Dict]]]:
+    """(cache entry, payload item or None for an unsent file) for one memory file; None when unreadable."""
     try:
         file_stat = os.lstat(path)
     except OSError:
@@ -264,44 +284,63 @@ def _check_file(path: Path, folder: Path, cached_entry: object) -> Optional[Tupl
     if not stat.S_ISREG(file_stat.st_mode):
         return None
     cached = _cached_verdict(cached_entry)
-    is_index = path.parent == folder and path.name == INDEX_FILE_NAME
     unchanged = cached.get("size") == file_stat.st_size and cached.get("mtime") == file_stat.st_mtime_ns
-    if unchanged and not is_index and not cached["findings"]:
+    if unchanged and not _sendable(cached, url_scan):
         return cached, None
     read = read_rule_file_contained(path, folder)
     if read is None:
         return None
     content, truncated, size, last_modified = read
     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-    verdict = cached if cached.get("sha256") == content_hash else {
-        "findings": find_secrets(content)[:MAX_FINDINGS_PER_FILE], "url_hosts": url_hosts(content)}
+    if cached.get("sha256") == content_hash:
+        verdict = cached
+    else:
+        found = find_secrets(content)
+        verdict = {"findings": found[:MAX_FINDINGS_PER_FILE], "url_hosts": url_hosts(content),
+                   **({"findings_truncated": True} if len(found) > MAX_FINDINGS_PER_FILE else {})}
     entry = {"size": file_stat.st_size, "mtime": file_stat.st_mtime_ns, "sha256": content_hash,
-             "findings": verdict["findings"], "url_hosts": verdict["url_hosts"]}
-    if not is_index and not entry["findings"]:
+             "findings": verdict["findings"], "url_hosts": verdict["url_hosts"],
+             **({"findings_truncated": True} if verdict.get("findings_truncated") else {})}
+    if not _sendable(entry, url_scan):
         return entry, None
     item = {"file_path": str(path), "file_name": path.name, "content": content, "size": size,
-            "last_modified": last_modified, "truncated": truncated}
-    if entry["findings"]:
-        item["findings"] = entry["findings"]
+            "last_modified": last_modified, "truncated": truncated, "content_sha256": content_hash,
+            "findings": entry["findings"], "url_hosts": entry["url_hosts"]}
+    if entry.get("findings_truncated"):
+        item["findings_truncated"] = True
     return entry, item
 
 
 def _fits_budget(item: Dict, content_budget: List[int]) -> bool:
-    """True and spends the item's sent size (JSON-escaped) from the budget when it fits."""
-    cost = len(json.dumps(item["content"]))
+    """True and spends the item's sent size (JSON-escaped content, findings, hosts) from the budget when it fits."""
+    cost = sum(len(json.dumps(item[key])) for key in ("content", "findings", "url_hosts"))
     if cost > content_budget[0]:
         return False
     content_budget[0] -= cost
     return True
 
 
-def _scan_folder(folder: Dict, cached_entries: Dict, deadline: float,
-                 content_budget: List[int]) -> Tuple[Optional[Dict], Dict]:
+def _spend_budget(ordered: List[Tuple[Path, Dict]], index_path: Path,
+                  content_budget: List[int]) -> Tuple[Optional[Dict], List[Dict]]:
+    """(index item or None, other items) that fit the budget, taken in order and capped per folder."""
+    index, sent = None, []
+    for path, item in ordered:
+        is_index = path == index_path
+        if (is_index or len(sent) < MAX_FLAGGED_FILES_PER_FOLDER) and _fits_budget(item, content_budget):
+            if is_index:
+                index = item
+            else:
+                sent.append(item)
+    return index, sent
+
+
+def _scan_folder(folder: Dict, cached_entries: Dict, deadline: float, content_budget: List[int],
+                 url_scan: bool = False) -> Tuple[Optional[Dict], Dict]:
     """(payload entry or None for a folder with no memory files, cache entries by file path)."""
     root = folder["path"]
     candidates = islice(_markdown_files(root, deadline), MAX_FILES_PER_MEMORY_FOLDER)
     attempted = [
-        (path, _check_file(path, root, cached_entries.get(str(path))))
+        (path, _check_file(path, root, cached_entries.get(str(path)), url_scan))
         for path in takewhile(lambda _: time.monotonic() < deadline, candidates)
     ]
     checked = [(path,) + result for path, result in attempted if result]
@@ -310,22 +349,26 @@ def _scan_folder(folder: Dict, cached_entries: Dict, deadline: float,
         return None, entries
     index_path = root / INDEX_FILE_NAME
     flagged = [entry for entry in entries.values() if entry["findings"]]
+    url_only = [entry for entry in entries.values() if not entry["findings"] and _sendable(entry, url_scan)]
     truncated = [entry for entry in entries.values() if entry["size"] > MAX_CONFIG_FILE_SIZE]
     clean = [entry for entry in entries.values()
              if not entry["findings"] and entry["size"] <= MAX_CONFIG_FILE_SIZE]
-    index_item = next((item for path, _, item in checked if path == index_path), None)
-    index = index_item if index_item and _fits_budget(index_item, content_budget) else None
-    flagged_items = [item for path, _, item in checked if item and path != index_path]
-    sent = list(islice(
-        (item for item in flagged_items if _fits_budget(item, content_budget)), MAX_FLAGGED_FILES_PER_FOLDER))
-    not_sent = len(flagged_items) - len(sent) + bool(index_item and not index)
+    ordered = sorted(((path, item) for path, _, item in checked if item),
+                     key=lambda pair: (not pair[1]["findings"], pair[0] != index_path))
+    index, sent = _spend_budget(ordered, index_path, content_budget)
+    sent_ids = {id(item) for item in sent + [index]}
+    unsent = [item for _, item in ordered if id(item) not in sent_ids]
+    not_sent = sum(bool(item["findings"]) for item in unsent)
+    url_only_not_sent = len(unsent) - not_sent
     return {
         **folder,
         "path": str(root),
         "index": index,
         "flagged": sent,
         "counts": {"total": len(checked), "flagged": len(flagged), "clean": len(clean), "truncated": len(truncated),
-                   **({"not_sent": not_sent} if not_sent else {})},
+                   **({"url_only": len(url_only)} if url_only else {}),
+                   **({"not_sent": not_sent} if not_sent else {}),
+                   **({"url_only_not_sent": url_only_not_sent} if url_only_not_sent else {})},
         "url_hosts": sorted({host for entry in entries.values() for host in entry["url_hosts"]})[
             :MAX_URL_HOSTS_PER_FOLDER],
     }, entries
@@ -368,7 +411,7 @@ def _write_cache(users: Dict) -> None:
         logger.debug(f"memory-scan-cache write failed: {e}")
 
 
-def collect_claude_memories(home: Path, home_user: str) -> Optional[Dict]:
+def collect_claude_memories(home: Path, home_user: str, url_scan: bool = False) -> Optional[Dict]:
     """The memories block for one user's Claude Code report, or None when the scan failed or ran out of time."""
     try:
         deadline = time.monotonic() + MEMORY_SCAN_BUDGET_SECONDS
@@ -378,7 +421,7 @@ def collect_claude_memories(home: Path, home_user: str) -> Optional[Dict]:
         memory_folders, project_entries = _memory_folders(home, deadline, cached_entries)
         content_budget = [MAX_MEMORY_CONTENT_BYTES]
         scanned = [
-            _scan_folder(folder, cached_entries, deadline, content_budget)
+            _scan_folder(folder, cached_entries, deadline, content_budget, url_scan)
             for folder in takewhile(lambda _: time.monotonic() < deadline, memory_folders)
         ]
         entries = {**project_entries,

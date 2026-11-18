@@ -7,15 +7,15 @@ from typing import Dict, Iterator, List, Pattern, Tuple
 # Kept byte-identical in coding-discovery-tool and ai-gateway-data; bump RULES_VERSION on any change.
 RULES_VERSION = 4
 
-# Inside a URL: a query value of 8+ characters with a digit, or a 16-character run mixing letters and digits.
-_URL_TOKEN = (
-    r'(?:\?[^\'"\s#]{0,200}=(?=[^&\'"\s#]{0,200}[0-9])[^&\'"\s#]{8}'
-    r'|(?=[A-Za-z_-]{0,15}[0-9])(?=[0-9_-]{0,15}[A-Za-z])[A-Za-z0-9_-]{16})'
+# A URL that can carry a secret: a query string with a digit in it, or a 16-character run mixing letters and digits.
+_URL_WITH_TOKEN = (
+    r'(?:[^\'"\s?]{0,2000}\?[^\'"\s]{0,2000}[0-9]'
+    r'|[^\'"\s]{0,2000}(?=[A-Za-z_-]{0,15}[0-9])(?=[0-9_-]{0,15}[A-Za-z])[A-Za-z0-9_-]{16})'
 )
 # A quoted value that is a placeholder, a shell variable, a template or a plain URL, not a secret.
 _PLACEHOLDER = (
     r'(?![<{])(?!\$[({]|\$(?-i:[A-Z_][A-Z0-9_]*)["\'])(?![*xX]+["\'])'
-    r'(?![A-Za-z][A-Za-z0-9+.-]{0,30}://(?![^\'"\s]{0,2000}' + _URL_TOKEN + r')[^\'"\s]{0,2000}["\'])'
+    r'(?![A-Za-z][A-Za-z0-9+.-]{0,30}://(?!' + _URL_WITH_TOKEN + r')[^\'"\s]{0,2000}["\'])'
     r'(?!(?:changeme|password|example|placeholder|redacted)["\'])(?!your[_-][^\'"\s]*["\'])'
 )
 # A host on the same machine: a loopback address, the Docker host, or a bare name such as a compose service.
@@ -25,9 +25,10 @@ _LOCAL_HOST = (
 )
 # A URL password that is a template on any host, or a stock default on a local host: not a secret.
 _STOCK_URL_PASSWORD = (
-    r'(?!\$\{[A-Za-z_][A-Za-z0-9_]{0,60}(?::?[-=?+][^}@]{0,60})?\}@|\$\([^)@]{0,60}\)@|\$[A-Z_][A-Z0-9_]{0,60}@'
-    r'|<[A-Za-z_][A-Za-z0-9_ .-]{0,60}>@|\{\{? ?[A-Za-z_][A-Za-z0-9_ .|-]{0,60}\}{1,2}@'
-    r'|%\([A-Za-z_][A-Za-z0-9_]{0,60}\)[sd]@|%[sdv]@|%[A-Za-z_][A-Za-z0-9_]{0,60}%@|\*{1,60}@)'
+    r'(?!\$\{[A-Za-z_][A-Za-z0-9_]{0,60}(?::?[-=?+][^}@]{0,60})?\}@|\$\([^)@]{0,60}\)@'
+    r'|\$(?:[A-Z_]{1,60}|[A-Z][A-Z0-9]{0,30}_[A-Z0-9_]{0,30})@|<[A-Za-z_][A-Za-z_ .-]{0,60}>@'
+    r'|\{[A-Za-z_][A-Za-z_ .-]{0,60}\}@|\{\{ ?[A-Za-z_][A-Za-z0-9_ .|-]{0,60}\}\}@'
+    r'|%\([A-Za-z_][A-Za-z0-9_]{0,60}\)[sd]@|%[sdv]@|%[A-Za-z_]{1,60}%@|\*{1,60}@)'
     r'(?!(?i:password|passwd|pass|pwd|secret|changeme|example|test|admin|root|postgres|mysql|mongo|redis|user|username'
     r'|guest|default|x{3,60}|none|null)@' + _LOCAL_HOST + r')'
 )

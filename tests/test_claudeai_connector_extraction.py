@@ -772,6 +772,17 @@ class ClaudeAISameOrgSessionConnectorsTest(unittest.TestCase):
         with mock.patch.object(helpers, "_SESSION_MAX_FILES_READ", 2):
             self.assertEqual(self._names("Claude Cowork"), STALE)
 
+    def test_cap_keeps_the_latest_used_sessions_not_the_latest_saved(self):
+        self._signed_in()
+        org_dir = self.app_dir / "claude-code-sessions" / "acct-1" / "org-1"
+        _write_session(org_dir, "local_latest.json", [_connector("Linear")], self.now - 86400,
+                       last_activity=(self.now - 86400) * 1000)
+        for index in range(2):
+            _write_session(org_dir, f"local_resaved_{index}.json", [_connector("Slack")], self.now - 3600 - index,
+                           last_activity=(self.now - (5 + index) * 86400) * 1000)
+        with mock.patch.object(helpers, "_SESSION_MAX_FILES", 2):
+            self.assertEqual(self._names("Claude Cowork"), ["claude.ai Linear", "claude.ai Slack"])
+
     def test_unusable_last_activity_falls_back_to_file_time(self):
         self._signed_in()
         org_dir = self.app_dir / "claude-code-sessions" / "acct-1" / "org-1"

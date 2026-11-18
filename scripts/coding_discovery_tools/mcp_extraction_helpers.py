@@ -3137,8 +3137,6 @@ def _same_org_desktop_session_servers(home: Path) -> List[Dict[str, Any]]:
     newest_first = sorted(candidates, key=lambda item: item[0], reverse=True)[:_SESSION_MAX_FILES_READ]
     listings: List[Tuple[float, List[Any]]] = []
     for mtime, file, boundary_real in newest_first:
-        if len(listings) >= _SESSION_MAX_FILES:
-            break
         data = _read_bounded_json(file, boundary_real)
         configured = data.get("remoteMcpServersConfig") if isinstance(data, dict) else None
         if not isinstance(configured, list):
@@ -3148,7 +3146,7 @@ def _same_org_desktop_session_servers(home: Path) -> List[Dict[str, Any]]:
             listings.append((last_used, configured))
 
     servers_by_name: Dict[str, Dict[str, Any]] = {}
-    for last_used, configured in sorted(listings, key=lambda item: item[0], reverse=True):
+    for last_used, configured in sorted(listings, key=lambda item: item[0], reverse=True)[:_SESSION_MAX_FILES]:
         observed_at = (
             datetime.datetime.fromtimestamp(last_used, tz=datetime.timezone.utc)
             .replace(microsecond=0).isoformat()

@@ -761,26 +761,30 @@ class ClaudeAIUnsafeFileRootScanTest(unittest.TestCase):
             self.skipTest("cannot create symlinks here")
         self.assertEqual(self._servers(), {"bob": {"claude.ai BobOnly": []}})
 
-    def test_claude_code_config_linked_out_of_its_home_is_not_read(self):
-        _write_json(self.bob / ".claude.json", {})
-        _write_json(self.alice / "dotfiles" / "claude.json", {})
+    def test_claude_code_config_must_be_a_file_of_its_own_home(self):
+        bobs = _write_json(self.bob / ".claude.json", {"mcpServers": {"bobs": {}}})
+        mine = _write_json(self.alice / "dotfiles" / "claude.json", {"mcpServers": {"mine": {}}})
+        config = self.alice / ".claude.json"
+        cases = (("link out of the home", os.symlink, bobs, None),
+                 ("hard link to another user's file", os.link, bobs, None),
+                 ("link inside the home", os.symlink, mine, {"mcpServers": {"mine": {}}}))
+        for label, make_link, target, expected in cases:
+            with self.subTest(label):
+                if os.path.lexists(config):
+                    config.unlink()
+                try:
+                    make_link(target, config)
+                except (OSError, NotImplementedError):
+                    self.skipTest("cannot create links here")
+                self.assertEqual(helpers.read_claude_code_config(config), expected)
 
-        def homes_read(target):
-            link = self.alice / ".claude.json"
-            if link.is_symlink():
-                link.unlink()
-            try:
-                os.symlink(target, link)
-            except (OSError, NotImplementedError):
-                self.skipTest("cannot create symlinks here")
-            read = []
-            helpers.extract_dual_path_configs_with_root_support(
-                self.root_home / ".claude.json", self.root_home / ".claude" / "mcp.json",
-                lambda config_path: read.append(config_path.parent.name) or [])
-            return read
-
-        self.assertEqual(homes_read(self.bob / ".claude.json"), ["bob"])
-        self.assertEqual(homes_read(self.alice / "dotfiles" / "claude.json"), ["alice", "bob"])
+    def test_claude_code_config_owned_by_another_account_is_still_read(self):
+        _write_json(self.alice / ".claude.json",
+                    {"mcpServers": {"mine": {}}, "claudeAiMcpEverConnected": ["claude.ai X"]})
+        self.assertEqual(helpers._claudeai_names_from_config(self.alice), ["claude.ai X"])
+        with mock.patch("scripts.coding_discovery_tools.path_containment._owner_uid", return_value=-1):
+            self.assertEqual(helpers.read_claude_code_config(self.alice / ".claude.json")["mcpServers"], {"mine": {}})
+            self.assertEqual(helpers._claudeai_names_from_config(self.alice), [])
 
     def test_own_home_scan_still_follows_a_linked_cli_config(self):
         self._cli(self.bob, ["claude.ai Mine"])

@@ -2590,10 +2590,6 @@ def extract_dual_path_configs_with_root_support(
     import platform
     
     all_projects = []
-
-    def extract_owned(config_path: Path, home: Path) -> List[Dict]:
-        # On an admin scan a config that links out of its home is another user's file.
-        return [] if _config_leaves_home(config_path, home) else extract_from_file_func(config_path)
     
     # Check if running as admin/root
     is_admin = False
@@ -2634,7 +2630,7 @@ def extract_dual_path_configs_with_root_support(
             try:
                 user_preferred = user_dir / preferred_path.relative_to(Path.home())
                 if user_preferred.exists():
-                    user_projects = extract_owned(user_preferred, user_dir)
+                    user_projects = extract_from_file_func(user_preferred)
                     if user_projects:
                         all_projects.extend(user_projects)
                         continue
@@ -2645,7 +2641,7 @@ def extract_dual_path_configs_with_root_support(
             try:
                 user_fallback = user_dir / fallback_path.relative_to(Path.home())
                 if user_fallback.exists():
-                    user_projects = extract_owned(user_fallback, user_dir)
+                    user_projects = extract_from_file_func(user_fallback)
                     if user_projects:
                         all_projects.extend(user_projects)
             except (ValueError, OSError):
@@ -2657,21 +2653,21 @@ def extract_dual_path_configs_with_root_support(
         import platform as _platform
         if _platform.system() != "Linux" and not _own_home_already_scanned(admin_homes):
             if preferred_path.exists():
-                root_projects = extract_owned(preferred_path, Path.home())
+                root_projects = extract_from_file_func(preferred_path)
                 if root_projects:
                     all_projects.extend(root_projects)
             elif fallback_path.exists():
-                root_projects = extract_owned(fallback_path, Path.home())
+                root_projects = extract_from_file_func(fallback_path)
                 if root_projects:
                     all_projects.extend(root_projects)
     else:
         # For regular users, check their own home directory
         if preferred_path.exists():
-            user_projects = extract_owned(preferred_path, Path.home())
+            user_projects = extract_from_file_func(preferred_path)
             if user_projects:
                 all_projects.extend(user_projects)
         elif fallback_path.exists():
-            user_projects = extract_owned(fallback_path, Path.home())
+            user_projects = extract_from_file_func(fallback_path)
             if user_projects:
                 all_projects.extend(user_projects)
     
@@ -2754,13 +2750,18 @@ def _scans_another_users_home(home: Path) -> bool:
     return elevated or os.path.realpath(str(home)) != os.path.realpath(str(Path.home()))
 
 
-def _config_leaves_home(config_path: Path, home: Path) -> bool:
-    """True on an admin scan when `config_path` resolves outside `home`."""
+def read_claude_code_config(config_path: Path) -> Any:
+    """Claude Code's `~/.claude.json` or `~/.claude/mcp.json` as JSON, else None."""
+    home = config_path.parent.parent if config_path.parent.name == ".claude" else config_path.parent
     if not _scans_another_users_home(home):
-        return False
-    from .path_containment import is_within, owned_boundary
+        return _read_bounded_json(config_path, None, _CLI_CONFIG_MAX_BYTES)
+    from .path_containment import owned_boundary
     home_real = owned_boundary(home, home)
-    return home_real is None or not is_within(config_path, home_real)
+    if home_real is None:
+        return None
+    # Resolved first so an in-home link is still read; the owner check is skipped for a `sudo claude` config.
+    target = Path(os.path.realpath(str(config_path)))
+    return _read_bounded_json(target, home_real, _CLI_CONFIG_MAX_BYTES, check_owner=False)
 
 
 def _read_json_dict(path: Path, home: Path, max_bytes: int) -> Dict[str, Any]:
@@ -2948,14 +2949,16 @@ _CLI_CONFIG_MAX_BYTES = 64 * 1024 * 1024
 _BUILTIN_REMOTE_CONNECTORS = (("visualize", "sandbox.claudemcpcontent.com"),)
 
 
-def _read_bounded_json(file: Path, boundary_real: Optional[str], max_bytes: int = _SESSION_MAX_BYTES) -> Any:
+def _read_bounded_json(
+    file: Path, boundary_real: Optional[str], max_bytes: int = _SESSION_MAX_BYTES, check_owner: bool = True
+) -> Any:
     """Parse a regular file of at most `max_bytes` as JSON, else None; with a boundary it must live inside it."""
     try:
         if boundary_real is None:
             fd = os.open(str(file), os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
         else:
             from .path_containment import open_contained
-            fd = open_contained(file, boundary_real)
+            fd = open_contained(file, boundary_real, check_owner)
         with os.fdopen(fd, "rb") as handle:
             status = os.fstat(handle.fileno())
             if not stat.S_ISREG(status.st_mode) or status.st_size > max_bytes:

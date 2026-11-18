@@ -19,8 +19,7 @@ from ...mcp_extraction_helpers import (
     extract_managed_mcp_config,
     extract_claude_plugin_mcp_configs_with_root_support,
     extract_claudeai_mcp_servers_with_root_support,
-    _read_bounded_json,
-    _CLI_CONFIG_MAX_BYTES,
+    read_claude_code_config,
     is_claude_plugins_path,
 )
 
@@ -139,7 +138,7 @@ class MacOSClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
         """
         try:
             # A regular file only: a pipe planted here would block the scan.
-            config_data = _read_bounded_json(config_path, None, _CLI_CONFIG_MAX_BYTES)
+            config_data = read_claude_code_config(config_path)
             if config_data is None:
                 return []
             

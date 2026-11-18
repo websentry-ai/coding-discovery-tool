@@ -17,14 +17,17 @@ _LOCAL_HOST = (
     r'(?:127\.0\.0\.1|0\.0\.0\.0|\[::1\]|host\.docker\.internal|(?=[A-Za-z0-9_-]{0,62}[A-Za-z_])[A-Za-z0-9_-]{1,63})'
     r'(?=[:/?#\s"\'`)\]>,;|*!}&]|\.(?![A-Za-z0-9-])|$)'
 )
-# A URL password that is a template on any host, or a stock default on a local host: not a secret.
+_STOCK_WORDS = (
+    r'(?i:password|passwd|pass|pwd|secret|changeme|example|test|admin|root|postgres|mysql|mongo|redis|user|username'
+    r'|guest|default|x{3,60}|none|null)'
+)
+# A URL password that is a template with no fallback value, or a stock default on a local host: not a secret.
 _STOCK_URL_PASSWORD = (
-    r'(?!\$\{[A-Za-z_][A-Za-z0-9_]{0,60}(?::?[-=?+][^}@]{0,60})?\}@|\$\([^)@]{0,60}\)@'
+    r'(?!\$\{[A-Za-z_][A-Za-z0-9_]{0,60}(?::?\?[^}@]{0,60}|:?[-=+])?\}@|\$\([^)@]{0,60}\)@'
     r'|\$(?:[A-Z_]{1,60}|[A-Z][A-Z0-9]{0,30}_[A-Z0-9_]{0,30})@|<[A-Za-z_][A-Za-z_ .-]{0,60}>@'
     r'|\{[A-Za-z_][A-Za-z_ .-]{0,60}\}@|\{\{ ?[A-Za-z_][A-Za-z0-9_ .|-]{0,60}\}\}@'
     r'|%\([A-Za-z_][A-Za-z0-9_]{0,60}\)[sd]@|%[sdv]@|%[A-Za-z_]{1,60}%@|\*{1,60}@)'
-    r'(?!(?i:password|passwd|pass|pwd|secret|changeme|example|test|admin|root|postgres|mysql|mongo|redis|user|username'
-    r'|guest|default|x{3,60}|none|null)@' + _LOCAL_HOST + r')'
+    r'(?!(?:' + _STOCK_WORDS + r'|\$\{[A-Za-z_][A-Za-z0-9_]{0,60}:?[-=]' + _STOCK_WORDS + r'\})@' + _LOCAL_HOST + r')'
 )
 # A key that names a setting about the secret (its name, URL, TTL...) rather than holding it.
 _DESCRIPTOR_KEY = (

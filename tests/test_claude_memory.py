@@ -29,7 +29,7 @@ EMPTY_BLOCK_HASH = hashlib.sha256(
 SLUG = "-work-shop"
 
 # Must equal the same constant in the other repo (coding-discovery-tool / ai-gateway-data).
-MEMORY_SECRET_RULES_SHA256 = "97c6891151ef606afc2e45e87e6bacf9e49dd6ef0d3b382b18a2a6089e9419ed"
+MEMORY_SECRET_RULES_SHA256 = "65eee9112ee1bc91e69da5ec022a723ef763b7389ac665f68b0d58a9d75b62c8"
 
 PRIVATE_KEY_BLOCK = (
     "-----BEGIN RSA PRIVATE KEY-----\n" + "MIIEowIBAAKCAQEA1b2c3d4e5f6g7h8i9j0k1l2m3n4\n" * 3
@@ -92,6 +92,7 @@ SHOULD_MASK = [
     ("Stock URL password on a host that only starts with localhost", "postgres://admin:admin@localhost.evil.com/app"),
     ("URL password that only starts like a command substitution", "postgres://app:$(x)Rl9!secret@db.example.com/app"),
     ("URL password in braces with digits", "postgres://app:{Pr0dPass99}@db.corp.example.com/app"),
+    ("URL password template with a real fallback value", "postgres://app:${DB_PASS:-S3cretProd9}@db.example.com/app"),
     ("Google API key with a hyphen in URL query",
      "https://maps.googleapis.com/maps/api/geocode/json?key=" + "AIza" + "SyD-3x4mpl3K3y_abcdefghijklmnopqrst"),
     ("Private key with a short last line", PRIVATE_KEY_BLOCK.replace("-----END", "AB==\n-----END")),
@@ -123,6 +124,8 @@ SHOULD_NOT_MASK = [
     ("Local database URL with a stock password", "postgres://postgres:postgres@localhost:5432/app"),
     ("Database URL with a placeholder password", "mysql://user:password@db:3306/app"),
     ("Database URL with variables", "postgres://${DB_USER}:${DB_PASS}@db.internal:5432/app"),
+    ("URL password template with a stock fallback on a local host",
+     "postgres://app:${POSTGRES_PW:-postgres}@db:5432/app"),
     ("URL with the password same as the username on a bare host name", "amqp://guest:guest@mq:5672"),
     ("Local stock URL at the end of a sentence", "Use postgres://postgres:postgres@localhost."),
     ("Local stock URL in bold", "**postgres://postgres:postgres@localhost**"),

@@ -3096,8 +3096,16 @@ def _cli_org_folder(home: Path, contained: bool) -> Optional[str]:
     return org if isinstance(org, str) and org else None
 
 
+def _session_last_used(data: Dict[str, Any], mtime: float) -> float:
+    """`lastActivityAt` in seconds, capped at the file's mtime: the app re-saves old session files."""
+    activity = data.get("lastActivityAt")
+    if isinstance(activity, bool) or not isinstance(activity, (int, float)) or not activity > 0:
+        return mtime
+    return min(activity / 1000, mtime)
+
+
 def _same_org_desktop_session_servers(home: Path) -> List[Dict[str, Any]]:
-    """Connectors from the CLI org's session files of the last 30 days; the newest listing of each name wins."""
+    """Connectors from the CLI org's sessions used in the last 30 days; the latest listing of each name wins."""
     app_dir = _claude_app_support_dir(home)
     running_as_root = hasattr(os, "geteuid") and os.geteuid() == 0
     contained = running_as_root or os.path.realpath(str(home)) != os.path.realpath(str(Path.home()))
@@ -3125,14 +3133,20 @@ def _same_org_desktop_session_servers(home: Path) -> List[Dict[str, Any]]:
         )
 
     newest_first = sorted(candidates, key=lambda item: item[0], reverse=True)[:_SESSION_MAX_FILES]
-    servers_by_name: Dict[str, Dict[str, Any]] = {}
+    listings: List[Tuple[float, List[Any]]] = []
     for mtime, file, boundary_real in newest_first:
         data = _read_bounded_json(file, boundary_real)
         configured = data.get("remoteMcpServersConfig") if isinstance(data, dict) else None
         if not isinstance(configured, list):
             continue
+        last_used = _session_last_used(data, mtime)
+        if last_used >= cutoff:
+            listings.append((last_used, configured))
+
+    servers_by_name: Dict[str, Dict[str, Any]] = {}
+    for last_used, configured in sorted(listings, key=lambda item: item[0], reverse=True):
         observed_at = (
-            datetime.datetime.fromtimestamp(mtime, tz=datetime.timezone.utc)
+            datetime.datetime.fromtimestamp(last_used, tz=datetime.timezone.utc)
             .replace(microsecond=0).isoformat()
         )
         for server in _desktop_session_servers(configured, observed_at):

@@ -33,13 +33,14 @@ def _write_json(path: Path, payload) -> Path:
     return path
 
 
-def _write_session(session_dir: Path, name: str, connectors, mtime: float) -> Path:
+def _write_session(session_dir: Path, name: str, connectors, mtime: float, last_activity=None) -> Path:
     """Write one desktop session file carrying `remoteMcpServersConfig`."""
     session_dir.mkdir(parents=True, exist_ok=True)
     path = session_dir / name
     path.write_text(json.dumps({
         "sessionId": name,
         "remoteMcpServersConfig": connectors,
+        **({} if last_activity is None else {"lastActivityAt": last_activity}),
     }), encoding="utf-8")
     os.utime(path, (mtime, mtime))
     return path
@@ -739,6 +740,33 @@ class ClaudeAISameOrgSessionConnectorsTest(unittest.TestCase):
         servers = [s for p in self.detector.process_single_tool({"name": "Claude Cowork"})["projects"]
                    for s in p["mcpServers"]]
         self.assertEqual([s["scan"]["tools"] for s in servers], [[{"name": "send_message", "description": "Send."}]])
+
+    def test_resaved_old_session_is_dated_by_its_last_activity(self):
+        self._signed_in()
+        self._session([_connector("Linear")], age_days=2)
+        org_dir = self.app_dir / "claude-code-sessions" / "acct-1" / "org-1"
+        _write_session(org_dir, "local_old.json", [_connector("Gmail")], self.now - 86400,
+                       last_activity=(self.now - 40 * 86400) * 1000)
+        self.assertEqual(self._names("Claude Cowork"), ["claude.ai Linear"])
+
+    def test_latest_used_session_supplies_the_tools(self):
+        self._signed_in()
+        org_dir = self.app_dir / "claude-code-sessions" / "acct-1" / "org-1"
+        _write_session(org_dir, "local_used.json", [_connector("Slack", tools=SLACK_TOOLS)], self.now - 3 * 86400,
+                       last_activity=(self.now - 3 * 86400) * 1000)
+        _write_session(org_dir, "local_resaved.json", [_connector("Slack", tools=[{"name": "old"}])],
+                       self.now - 86400, last_activity=(self.now - 9 * 86400) * 1000)
+        servers = [s for p in self.detector.process_single_tool({"name": "Claude Cowork"})["projects"]
+                   for s in p["mcpServers"]]
+        self.assertEqual([s["scan"]["tools"] for s in servers], [[{"name": "send_message", "description": "Send."}]])
+
+    def test_unusable_last_activity_falls_back_to_file_time(self):
+        self._signed_in()
+        org_dir = self.app_dir / "claude-code-sessions" / "acct-1" / "org-1"
+        for index, junk in enumerate(("soon", True, -5, float("inf"))):
+            _write_session(org_dir, f"local_{index}.json", [_connector(f"C{index}")], self.now - 86400 - index,
+                           last_activity=junk)
+        self.assertEqual(self._names("Claude Cowork"), [f"claude.ai C{index}" for index in range(4)])
 
     def test_every_fallback_matches_todays_output(self):
         def cli_desktop_mismatch():

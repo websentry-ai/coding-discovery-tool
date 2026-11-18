@@ -723,6 +723,17 @@ class TestMemoryDiscovery(_MemoryHome):
         self.assertNotIn("not_sent", folder["counts"])
         self.assertEqual(folder["counts"]["url_only_not_sent"], 1)
 
+    def test_findings_in_a_later_folder_are_sent_before_url_only_files_of_an_earlier_folder(self):
+        secret_text = "url: " + FAKE_SECRET + "\n"
+        _write(_memory_dir(self.home, "-a") / "links.md", "see https://a.example.com\n")
+        _write(_memory_dir(self.home, "-b") / "db.md", secret_text)
+
+        with patch.object(cmh, "MAX_MEMORY_CONTENT_BYTES", _sent_cost(secret_text) + 5):
+            first, second = self.collect(url_scan=True)["folders"]
+
+        self.assertEqual(([item["file_name"] for item in second["flagged"]], first["flagged"]), (["db.md"], []))
+        self.assertEqual((first["counts"]["url_only_not_sent"], second["counts"].get("not_sent")), (1, None))
+
     def test_url_scanning_changes_the_block_hash(self):
         _write(_memory_dir(self.home) / "links.md", "see https://a.example.com\n")
 

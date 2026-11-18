@@ -320,23 +320,26 @@ def _fits_budget(item: Dict, content_budget: List[int]) -> bool:
     return True
 
 
-def _spend_budget(ordered: List[Tuple[Path, Dict]], index_path: Path,
-                  content_budget: List[int]) -> Tuple[Optional[Dict], List[Dict]]:
-    """(index item or None, other items) that fit the budget, taken in order and capped per folder."""
-    index, sent = None, []
-    for path, item in ordered:
-        is_index = path == index_path
-        if (is_index or len(sent) < MAX_FLAGGED_FILES_PER_FOLDER) and _fits_budget(item, content_budget):
-            if is_index:
-                index = item
-            else:
-                sent.append(item)
-    return index, sent
+def _spend_budget(scans: List[Dict], content_budget: List[int]) -> List[Tuple[Optional[Dict], List[Dict]]]:
+    """Per scan, (index item or None, other items) that fit the budget; files with findings in every folder go first."""
+    picks = [{"index": None, "sent": []} for _ in scans]
+    for with_findings in (True, False):
+        for scan, pick in zip(scans, picks):
+            for path, item in scan["ordered"]:
+                is_index = path == scan["index_path"]
+                if (bool(item["findings"]) == with_findings
+                        and (is_index or len(pick["sent"]) < MAX_FLAGGED_FILES_PER_FOLDER)
+                        and _fits_budget(item, content_budget)):
+                    if is_index:
+                        pick["index"] = item
+                    else:
+                        pick["sent"].append(item)
+    return [(pick["index"], pick["sent"]) for pick in picks]
 
 
-def _scan_folder(folder: Dict, cached_entries: Dict, deadline: float, content_budget: List[int],
+def _scan_folder(folder: Dict, cached_entries: Dict, deadline: float,
                  url_scan: bool = False) -> Tuple[Optional[Dict], Dict]:
-    """(payload entry or None for a folder with no memory files, cache entries by file path)."""
+    """(scan of a folder or None when it has no memory files, cache entries by file path)."""
     root = folder["path"]
     candidates = islice(_markdown_files(root, deadline), MAX_FILES_PER_MEMORY_FOLDER)
     attempted = [
@@ -348,30 +351,33 @@ def _scan_folder(folder: Dict, cached_entries: Dict, deadline: float, content_bu
     if not checked:
         return None, entries
     index_path = root / INDEX_FILE_NAME
-    flagged = [entry for entry in entries.values() if entry["findings"]]
-    url_only = [entry for entry in entries.values() if not entry["findings"] and _sendable(entry, url_scan)]
-    truncated = [entry for entry in entries.values() if entry["size"] > MAX_CONFIG_FILE_SIZE]
-    clean = [entry for entry in entries.values()
-             if not entry["findings"] and entry["size"] <= MAX_CONFIG_FILE_SIZE]
     ordered = sorted(((path, item) for path, _, item in checked if item),
                      key=lambda pair: (not pair[1]["findings"], pair[0] != index_path))
-    index, sent = _spend_budget(ordered, index_path, content_budget)
+    return {"folder": folder, "entries": entries, "ordered": ordered, "index_path": index_path}, entries
+
+
+def _folder_payload(scan: Dict, index: Optional[Dict], sent: List[Dict], url_scan: bool) -> Dict:
+    """The payload entry of a scanned folder: the files that fit the budget and the folder's counts."""
+    entries = list(scan["entries"].values())
+    flagged = [entry for entry in entries if entry["findings"]]
+    url_only = [entry for entry in entries if not entry["findings"] and _sendable(entry, url_scan)]
+    truncated = [entry for entry in entries if entry["size"] > MAX_CONFIG_FILE_SIZE]
+    clean = [entry for entry in entries if not entry["findings"] and entry["size"] <= MAX_CONFIG_FILE_SIZE]
     sent_ids = {id(item) for item in sent + [index]}
-    unsent = [item for _, item in ordered if id(item) not in sent_ids]
+    unsent = [item for _, item in scan["ordered"] if id(item) not in sent_ids]
     not_sent = sum(bool(item["findings"]) for item in unsent)
     url_only_not_sent = len(unsent) - not_sent
     return {
-        **folder,
-        "path": str(root),
+        **scan["folder"],
+        "path": str(scan["folder"]["path"]),
         "index": index,
         "flagged": sent,
-        "counts": {"total": len(checked), "flagged": len(flagged), "clean": len(clean), "truncated": len(truncated),
+        "counts": {"total": len(entries), "flagged": len(flagged), "clean": len(clean), "truncated": len(truncated),
                    **({"url_only": len(url_only)} if url_only else {}),
                    **({"not_sent": not_sent} if not_sent else {}),
                    **({"url_only_not_sent": url_only_not_sent} if url_only_not_sent else {})},
-        "url_hosts": sorted({host for entry in entries.values() for host in entry["url_hosts"]})[
-            :MAX_URL_HOSTS_PER_FOLDER],
-    }, entries
+        "url_hosts": sorted({host for entry in entries for host in entry["url_hosts"]})[:MAX_URL_HOSTS_PER_FOLDER],
+    }
 
 
 def _folders_hash(folders: List[Dict]) -> str:
@@ -419,9 +425,8 @@ def collect_claude_memories(home: Path, home_user: str, url_scan: bool = False) 
         cached_entries = users.get(home_user)
         cached_entries = cached_entries if isinstance(cached_entries, dict) else {}
         memory_folders, project_entries = _memory_folders(home, deadline, cached_entries)
-        content_budget = [MAX_MEMORY_CONTENT_BYTES]
         scanned = [
-            _scan_folder(folder, cached_entries, deadline, content_budget, url_scan)
+            _scan_folder(folder, cached_entries, deadline, url_scan)
             for folder in takewhile(lambda _: time.monotonic() < deadline, memory_folders)
         ]
         entries = {**project_entries,
@@ -435,7 +440,9 @@ def collect_claude_memories(home: Path, home_user: str, url_scan: bool = False) 
         if not finished:
             logger.warning(f"Claude memory scan for {home_user} ran out of time; the next run resumes it")
             return None
-        folders = [payload for payload, _ in scanned if payload]
+        scans = [scan for scan, _ in scanned if scan]
+        spent = _spend_budget(scans, [MAX_MEMORY_CONTENT_BYTES])
+        folders = [_folder_payload(scan, index, sent, url_scan) for scan, (index, sent) in zip(scans, spent)]
         return {"hash": _folders_hash(folders), "rules_version": RULES_VERSION, "folders": folders}
     except Exception as e:
         logger.warning(f"Claude memory discovery failed for {home_user}: {e}")

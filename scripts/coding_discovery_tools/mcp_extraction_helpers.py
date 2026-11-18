@@ -2917,7 +2917,7 @@ _SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 _SESSION_MAX_BYTES = 5 * 1024 * 1024
 _SESSION_MAX_NAME_CHARS = 200
 _SESSION_MAX_FILES = 200
-# Files opened to find those: the app re-saves old sessions, so file time alone cannot pick them.
+# With more session files than this the rule is skipped: a partial read could hide a connector.
 _SESSION_MAX_FILES_READ = 1000
 _CLI_CONFIG_MAX_BYTES = 64 * 1024 * 1024
 # (lowercased name, lowercased host) of connectors the desktop app adds itself.
@@ -3134,9 +3134,11 @@ def _same_org_desktop_session_servers(home: Path) -> List[Dict[str, Any]]:
             if mtime >= cutoff
         )
 
-    newest_first = sorted(candidates, key=lambda item: item[0], reverse=True)[:_SESSION_MAX_FILES_READ]
+    if len(candidates) > _SESSION_MAX_FILES_READ:
+        return []
+
     listings: List[Tuple[float, List[Any]]] = []
-    for mtime, file, boundary_real in newest_first:
+    for mtime, file, boundary_real in candidates:
         data = _read_bounded_json(file, boundary_real)
         configured = data.get("remoteMcpServersConfig") if isinstance(data, dict) else None
         if not isinstance(configured, list):

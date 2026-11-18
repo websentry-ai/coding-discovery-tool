@@ -35,7 +35,7 @@ BINARY_HEAD_BYTES = 512  # what the backend reads to tell an image from an execu
 _SNIFF_BYTES = 8192  # a NUL in the first bytes marks a file as binary
 # Every file is hashed whole (sha256 is always the real digest) up to this many bytes per folder; past it a file is
 # listed without one. Byte-based, so which files are hashed never depends on timing.
-MAX_HASHED_BYTES_PER_FOLDER = 256 * 1024 * 1024  # about half a second of hashing on a laptop disk
+MAX_BINARY_HEADS = 1000  # binaries sent with their first bytes; the backend keeps at most 1,000 files anyway
 MAX_DIR_ENTRIES = 10_000  # entries read from one folder; a bigger folder is marked as not walked
 MAX_EXAMINED_ENTRIES = 50_000  # entries looked at in the whole skill folder, files and folders alike
 _DEADLINE_CHECK_EVERY = 256  # entries between time checks while a folder is read
@@ -176,7 +176,7 @@ def _read_dir(path: str, deadline: float, room: int):
     return sorted(batch, key=lambda e: e.name), False
 
 
-def _list_files(root: Path, deadline: float) -> List[Dict]:
+def _list_files(root: Path, deadline: float, skill_md_name: str = SKILL_FILE_NAME) -> List[Dict]:
     """Regular files under root (relative POSIX paths and sizes), never following a link; folders left unread are named."""
     listed: List[Dict] = []
     unwalked: List[str] = []  # folders past the depth, count, size or time limit
@@ -221,55 +221,46 @@ def _list_files(root: Path, deadline: float) -> List[Dict]:
             except OSError:
                 continue
             # SKILL.md itself is already sent as the skill's content.
-            if (not rel_dir and entry.name.lower() == SKILL_FILE_NAME.lower()) or entry.name.lower() in _SKIP_FILE_NAMES:
+            # Only the skill's own document is sent separately; a second skill.md beside it is a file like any other.
+            if (not rel_dir and entry.name == skill_md_name) or entry.name.lower() in _SKIP_FILE_NAMES:
                 continue
             listed.append({"path": rel, "size": size})
     # Named, not dropped: without these the list would look like the whole folder.
     return listed + [_not_walked(rel_dir) for rel_dir in sorted(set(unwalked))[:MAX_NOT_WALKED_LISTED]]
 
 
-def _read_file(root: Path, item: Dict, text_room: int, hash_room: int, deadline: float) -> int:
-    """Fill item's sha256, and its content or binary head, from one contained read; returns the bytes hashed."""
+def _read_file(root: Path, item: Dict, text_room: int, send_head: bool = True) -> None:
+    """Fill item's sha256 (always the whole file's), and its content or binary head, from one contained read."""
     opened = _open_checked(root / item["path"], root, allow_symlink=False)
     if opened is None:
         item["truncated"] = True
-        return 0
-    fd, st = opened
-    hash_it = st.st_size <= hash_room
+        return
+    fd, _ = opened
     keep = max(_SNIFF_BYTES, text_room * 4)  # a character is at most 4 bytes in UTF-8
-    digest, kept, read, at_end = hashlib.sha256(), bytearray(), 0, False
+    digest, kept, read = hashlib.sha256(), bytearray(), 0
     try:
         with os.fdopen(fd, "rb") as handle:
-            while hash_it or len(kept) < keep:
-                chunk = handle.read(1024 * 1024 if hash_it else keep - len(kept))
-                if not chunk:
-                    at_end = True
-                    break
+            # Read to the end every time: a file's digest is what makes any edit to it a new upload and a new version.
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 read += len(chunk)
-                if hash_it:
-                    digest.update(chunk)
-                    if time.monotonic() >= deadline:
-                        hash_it = False  # out of time mid-file: no digest rather than a partial one
+                digest.update(chunk)
                 kept += chunk[:keep - len(kept)]
-            if not at_end:
-                at_end = not handle.read(1)
-            if hash_it:
-                item["sha256"] = digest.hexdigest()
+        item["sha256"] = digest.hexdigest()
     except OSError:
         item["truncated"] = True
-        return 0
+        return
     if b"\x00" in kept[:_SNIFF_BYTES]:
         item["binary"] = True
-        item["head"] = base64.b64encode(bytes(kept[:BINARY_HEAD_BYTES])).decode("ascii")
-        return read if hash_it else 0
+        if send_head:
+            item["head"] = base64.b64encode(bytes(kept[:BINARY_HEAD_BYTES])).decode("ascii")
+        return
     text = bytes(kept).decode("utf-8", errors="replace")
     content = text[:text_room]
     if content:
         item["content"] = content
-    # Whole file read and every character kept, or it is marked as cut.
-    if not (at_end and read == len(kept)) or len(text) > len(content):
+    # Whole file kept and every character sent, or it is marked as cut.
+    if read > len(kept) or len(text) > len(content):
         item["truncated"] = True
-    return read if hash_it else 0
 
 
 def collect_skill_files(skill_md: Path) -> Optional[List[Dict]]:
@@ -283,8 +274,8 @@ def collect_skill_files(skill_md: Path) -> Optional[List[Dict]]:
         return copy.deepcopy(cached) if cached is not None else None
     deadline = time.monotonic() + FOLDER_TIME_BUDGET_SECONDS
     try:
-        files = sorted(_list_files(root, deadline), key=lambda f: (file_priority(f["path"]), f["path"]))
-        text_budget, hash_budget, with_text = MAX_TOTAL_CONTENT_CHARS, MAX_HASHED_BYTES_PER_FOLDER, 0
+        files = sorted(_list_files(root, deadline, skill_md.name), key=lambda f: (file_priority(f["path"]), f["path"]))
+        text_budget, with_text, heads = MAX_TOTAL_CONTENT_CHARS, 0, 0
         for item in files:
             if posixpath.basename(item["path"]) == NOT_WALKED_NAME and item.get("truncated"):
                 continue  # a folder left unread, not a file to open
@@ -293,7 +284,8 @@ def collect_skill_files(skill_md: Path) -> Optional[List[Dict]]:
                 item["truncated"] = True
                 continue
             room = min(MAX_FILE_CONTENT_CHARS, text_budget) if with_text < MAX_FILES_WITH_CONTENT else 0
-            hash_budget -= _read_file(root, item, room, hash_budget, deadline)
+            _read_file(root, item, room, send_head=heads < MAX_BINARY_HEADS)
+            heads += 1 if item.get("head") else 0
             if item.get("content"):
                 with_text += 1
                 text_budget -= len(item["content"])

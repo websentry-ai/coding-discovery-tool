@@ -697,7 +697,13 @@ def _must_not_block(test, seconds=3):
     test.assertFalse(blocked, "the scan blocked on a pipe")
 
 
-NOT_ELEVATED = mock.patch.object(os, "geteuid", return_value=501, create=True)
+@contextlib.contextmanager
+def _not_elevated():
+    windows = "scripts.coding_discovery_tools.windows_extraction_helpers."
+    with mock.patch.object(os, "geteuid", return_value=501, create=True), \
+            mock.patch(windows + "windows_admin_state", return_value=False), \
+            mock.patch(windows + "_running_as_local_system", return_value=False):
+        yield
 
 
 class ClaudeAIUnsafeFileRootScanTest(unittest.TestCase):
@@ -760,13 +766,13 @@ class ClaudeAIUnsafeFileRootScanTest(unittest.TestCase):
             os.symlink(self.bob / ".claude.json", self.alice / ".claude.json")
         except (OSError, NotImplementedError):
             self.skipTest("cannot create symlinks here")
-        with mock.patch.object(helpers.Path, "home", return_value=self.alice), NOT_ELEVATED:
+        with mock.patch.object(helpers.Path, "home", return_value=self.alice), _not_elevated():
             self.assertEqual(helpers._claudeai_names_from_config(self.alice), ["claude.ai Mine"])
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "needs FIFO support")
     def test_own_home_scan_skips_a_pipe_in_place_of_the_cli_config(self):
         os.mkfifo(self.alice / ".claude.json")
-        with mock.patch.object(helpers.Path, "home", return_value=self.alice), NOT_ELEVATED, _must_not_block(self):
+        with mock.patch.object(helpers.Path, "home", return_value=self.alice), _not_elevated(), _must_not_block(self):
             self.assertEqual(helpers._claudeai_names_from_config(self.alice), [])
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "needs FIFO support")

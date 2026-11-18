@@ -3184,16 +3184,11 @@ def _is_contained(path: Path, root: Path) -> bool:
     return True
 
 
-def _read_plugin_json(path: Path) -> Optional[Any]:
+def _read_plugin_json(path: Path, boundary_real: Optional[str] = None) -> Optional[Any]:
     """Parse a plugin JSON file. None when absent, unreadable or malformed."""
-    try:
-        if path.is_file():
-            return json.loads(path.read_text(encoding='utf-8', errors='replace'))
-    except (json.JSONDecodeError, PermissionError, OSError) as exc:
-        logger.debug(f"Plugin MCP source unreadable {path}: {exc}")
-    except Exception as exc:
-        logger.debug(f"Unexpected error reading plugin MCP source {path}: {exc}")
-    return None
+    # Resolved first, so a link that stays inside the boundary is still read.
+    target = Path(os.path.realpath(str(path))) if boundary_real is not None else path
+    return _read_bounded_json(target, boundary_real)
 
 
 def _server_entries_from_root_map(data: Dict) -> Dict:
@@ -3210,17 +3205,19 @@ def _server_entries_from_root_map(data: Dict) -> Dict:
     }
 
 
-def _resolve_relative_mcp_servers(value: str, plugin_dir: Path) -> Optional[Dict]:
+def _resolve_relative_mcp_servers(
+    value: str, plugin_dir: Path, boundary_real: Optional[str] = None
+) -> Optional[Dict]:
     """Follow a ``mcpServers`` that names another file instead of inlining a map."""
     candidate = plugin_dir / value
     if not _is_contained(candidate, plugin_dir):
         return None
-    data = _read_plugin_json(candidate)
+    data = _read_plugin_json(candidate, boundary_real)
     servers = data.get('mcpServers') if isinstance(data, dict) else None
     return servers if isinstance(servers, dict) else None
 
 
-def _plugin_mcp_server_map(plugin_dir: Path) -> Dict:
+def _plugin_mcp_server_map(plugin_dir: Path, boundary_real: Optional[str] = None) -> Dict:
     """``{server_name: config}`` declared by the plugin rooted at ``plugin_dir``.
 
     First source to declare a name wins. The bare root ``plugin.json`` is not
@@ -3236,7 +3233,7 @@ def _plugin_mcp_server_map(plugin_dir: Path) -> Dict:
         if not _is_contained(source, plugin_dir):
             logger.debug(f"Plugin MCP source escapes its plugin dir: {source}")
             continue
-        data = _read_plugin_json(source)
+        data = _read_plugin_json(source, boundary_real)
         if not isinstance(data, dict):
             continue
 
@@ -3246,7 +3243,7 @@ def _plugin_mcp_server_map(plugin_dir: Path) -> Dict:
         if not mcp_servers and source.name == '.mcp.json':
             mcp_servers = _server_entries_from_root_map(data) or None
         if isinstance(mcp_servers, str):
-            mcp_servers = _resolve_relative_mcp_servers(mcp_servers, plugin_dir)
+            mcp_servers = _resolve_relative_mcp_servers(mcp_servers, plugin_dir, boundary_real)
 
         if isinstance(mcp_servers, dict):
             for key, entry in mcp_servers.items():
@@ -3417,6 +3414,7 @@ def _extract_registered_plugin_mcp(
     plugins_root: Path,
     projects: List[Dict],
     plugin_lookup: Optional[Dict[str, Dict]] = None,
+    boundary_real: Optional[str] = None,
 ) -> bool:
     """Resolve plugin MCP servers through the installed-plugins registry.
 
@@ -3436,7 +3434,7 @@ def _extract_registered_plugin_mcp(
         entry_list = entries if isinstance(entries, list) else []
 
         for plugin_dir in _authoritative_plugin_dirs(plugin, marketplace_info, entry_list):
-            servers = _plugin_mcp_server_map(plugin_dir)
+            servers = _plugin_mcp_server_map(plugin_dir, boundary_real)
             if not servers:
                 continue
             # First dir that declares the servers wins; later ones repeat them.
@@ -3452,6 +3450,7 @@ def _scan_plugin_cache_dir(
     cache_dir: Path,
     projects: List[Dict],
     plugin_lookup: Optional[Dict[str, Dict]] = None,
+    boundary_real: Optional[str] = None,
 ) -> None:
     """
     Scan the plugin cache directory for MCP configs.
@@ -3478,7 +3477,7 @@ def _scan_plugin_cache_dir(
                     version_dir = _select_plugin_version_dir(plugin_dir)
                     if version_dir is None:
                         continue
-                    servers = _plugin_mcp_server_map(version_dir)
+                    servers = _plugin_mcp_server_map(version_dir, boundary_real)
                     if servers:
                         _append_plugin_project(
                             version_dir, plugin_dir.name, servers, projects,
@@ -3507,14 +3506,25 @@ def _extract_plugin_mcp_for_dir(
     if not plugins_dir.exists() or not plugins_dir.is_dir():
         return
 
-    if _extract_registered_plugin_mcp(plugins_dir, projects, plugin_lookup=plugin_lookup):
+    owner_home = plugins_dir.parent.parent
+    boundary_real = None
+    if _scans_another_users_home(owner_home):
+        from .path_containment import owned_boundary
+        # The home is the read boundary: a plugin may be installed anywhere inside it.
+        boundary_real = owned_boundary(owner_home, owner_home) if owned_boundary(owner_home, plugins_dir) else None
+        if boundary_real is None:
+            return
+
+    if _extract_registered_plugin_mcp(
+        plugins_dir, projects, plugin_lookup=plugin_lookup, boundary_real=boundary_real
+    ):
         return
 
     try:
         for plugin_dir in plugins_dir.iterdir():
             if not plugin_dir.is_dir():
                 continue
-            servers = _plugin_mcp_server_map(plugin_dir)
+            servers = _plugin_mcp_server_map(plugin_dir, boundary_real)
             if servers:
                 _append_plugin_project(
                     plugin_dir, plugin_dir.name, servers, projects,
@@ -3525,7 +3535,9 @@ def _extract_plugin_mcp_for_dir(
     except Exception as e:
         logger.debug(f"Error extracting plugin MCP configs: {e}")
 
-    _scan_plugin_cache_dir(plugins_dir / "cache", projects, plugin_lookup=plugin_lookup)
+    _scan_plugin_cache_dir(
+        plugins_dir / "cache", projects, plugin_lookup=plugin_lookup, boundary_real=boundary_real
+    )
 
 
 def extract_claude_plugin_mcp_configs(

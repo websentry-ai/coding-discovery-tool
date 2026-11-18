@@ -2916,7 +2916,6 @@ def claude_cli_and_desktop_share_account(home: Path) -> bool:
 _SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 _SESSION_MAX_BYTES = 5 * 1024 * 1024
 _SESSION_MAX_NAME_CHARS = 200
-_SESSION_MAX_FILES = 200
 # With more session files than this the rule is skipped: a partial read could hide a connector.
 _SESSION_MAX_FILES_READ = 1000
 _CLI_CONFIG_MAX_BYTES = 64 * 1024 * 1024
@@ -3158,13 +3157,16 @@ def _same_org_desktop_session_servers(home: Path) -> List[Dict[str, Any]]:
             listings.append((last_used, configured))
 
     servers_by_name: Dict[str, Dict[str, Any]] = {}
-    for last_used, configured in sorted(listings, key=lambda item: item[0], reverse=True)[:_SESSION_MAX_FILES]:
+    for last_used, configured in sorted(listings, key=lambda item: item[0], reverse=True):
         observed_at = (
             datetime.datetime.fromtimestamp(last_used, tz=datetime.timezone.utc)
             .replace(microsecond=0).isoformat()
         )
         for server in _desktop_session_servers(configured, observed_at):
-            servers_by_name.setdefault(server["name"].lower(), server)
+            key = server["name"].lower()
+            # A newer listing without a tool list does not discard an older one that has it.
+            if key not in servers_by_name or ("scan" in server and "scan" not in servers_by_name[key]):
+                servers_by_name[key] = server
     return list(servers_by_name.values())
 
 

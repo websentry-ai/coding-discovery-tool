@@ -2652,7 +2652,7 @@ def extract_dual_path_configs_with_root_support(
         # admin_homes, so re-adding it would double-count (WEB-4673) — skip then.
         import platform as _platform
         if _platform.system() != "Linux" and not _own_home_already_scanned(admin_homes):
-            if preferred_path.exists():
+            if _within_config_limit(preferred_path):
                 root_projects = extract_from_file_func(preferred_path)
                 if root_projects:
                     all_projects.extend(root_projects)
@@ -2662,7 +2662,7 @@ def extract_dual_path_configs_with_root_support(
                     all_projects.extend(root_projects)
     else:
         # For regular users, check their own home directory
-        if preferred_path.exists():
+        if _within_config_limit(preferred_path):
             user_projects = extract_from_file_func(preferred_path)
             if user_projects:
                 all_projects.extend(user_projects)
@@ -2748,6 +2748,14 @@ def _scans_another_users_home(home: Path) -> bool:
     else:
         elevated = hasattr(os, "geteuid") and os.geteuid() == 0
     return elevated or os.path.realpath(str(home)) != os.path.realpath(str(Path.home()))
+
+
+def _within_config_limit(config_path: Path) -> bool:
+    """True when `config_path` exists and is small enough to read; otherwise the fallback config is used."""
+    try:
+        return config_path.stat().st_size <= _CLI_CONFIG_MAX_BYTES
+    except OSError:
+        return False
 
 
 def read_claude_code_config(config_path: Path) -> Any:
@@ -3310,11 +3318,13 @@ def _is_contained(path: Path, root: Path) -> bool:
     return True
 
 
-def _read_plugin_json(path: Path, boundary_real: Optional[str] = None) -> Optional[Any]:
+def _read_plugin_json(
+    path: Path, boundary_real: Optional[str] = None, max_bytes: int = _SESSION_MAX_BYTES
+) -> Optional[Any]:
     """Parse a plugin JSON file. None when absent, unreadable or malformed."""
     # Resolved first, so a link that stays inside the boundary is still read.
     target = Path(os.path.realpath(str(path))) if boundary_real is not None else path
-    return _read_bounded_json(target, boundary_real)
+    return _read_bounded_json(target, boundary_real, max_bytes)
 
 
 def _server_entries_from_root_map(data: Dict) -> Dict:
@@ -3401,14 +3411,15 @@ def _installed_plugins_registry(plugins_root: Path, boundary_real: Optional[str]
     latter would resurrect the cache's leftovers. ``version`` is not gated on:
     a bumped file would otherwise drop every plugin.
     """
-    data = _read_plugin_json(plugins_root / "installed_plugins.json", boundary_real)
+    # The larger limit: skipping a big registry would bring uninstalled plugins back from the cache.
+    data = _read_plugin_json(plugins_root / "installed_plugins.json", boundary_real, _CLI_CONFIG_MAX_BYTES)
     plugins = data.get("plugins") if isinstance(data, dict) else None
     return plugins if isinstance(plugins, dict) else None
 
 
 def _marketplace_registry(plugins_root: Path, boundary_real: Optional[str] = None) -> Dict:
     """``known_marketplaces.json`` keyed by marketplace name."""
-    data = _read_plugin_json(plugins_root / "known_marketplaces.json", boundary_real)
+    data = _read_plugin_json(plugins_root / "known_marketplaces.json", boundary_real, _CLI_CONFIG_MAX_BYTES)
     return data if isinstance(data, dict) else {}
 
 

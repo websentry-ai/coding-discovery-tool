@@ -644,6 +644,16 @@ class TestOwnerContainment(unittest.TestCase):
         self._link(bob_plugins / "installed_plugins.json", self.alice_plugins / "installed_plugins.json")
         self.assertEqual(_server_names(self._scan_alice()[0]), _exposed("aliceplug", "mine"))
 
+    def test_registry_over_the_plugin_file_limit_is_still_authoritative(self):
+        installed = self.alice_plugins / "cache" / "mkt" / "kept" / "1.0.0"
+        _write_json(installed / ".mcp.json", _server("live"))
+        _write_json(self.alice_plugins / "cache" / "mkt" / "removed" / "1.0.0" / ".mcp.json", _server("leftover"))
+        _registry(self.alice_plugins, "kept@mkt", installed)
+        registry_file = self.alice_plugins / "installed_plugins.json"
+        registry = json.loads(registry_file.read_text(encoding="utf-8"))
+        _write_json(registry_file, {**registry, "pad": "x" * (6 * 1024 * 1024)})
+        self.assertEqual([_server_names(p) for p in self._scan_alice()], [_exposed("kept", "live")])
+
     def test_oversize_plugin_file_is_skipped(self):
         install_path = self.alice / "dev" / "plugin"
         _write_json(install_path / ".mcp.json", {"mcpServers": {"big": {"command": "x" * (6 * 1024 * 1024)}}})

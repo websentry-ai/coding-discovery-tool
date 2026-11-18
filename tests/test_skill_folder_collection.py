@@ -156,17 +156,42 @@ class TestLimits(SkillFolderTestCase):
         self.assertEqual(len(files), 1101)
         self.assertTrue(self.by_path(files)["zz/tool"]["binary"])
 
-    def test_listing_is_capped(self):
+    def test_listing_is_capped_and_says_the_rest_was_not_walked(self):
         with patch.object(sf, "MAX_WALKED_FILES", 20):
             for n in range(30):
                 self.write(f"f{n:02d}.txt", "x")
-            self.assertEqual(len(self.collect()), 20)
+            files = self.collect()
+        self.assertEqual(len([f for f in files if f["path"] != sf.NOT_WALKED_NAME]), 20)
+        self.assertIn({"path": sf.NOT_WALKED_NAME, "size": 0, "truncated": True}, files)
+
+    def test_folders_left_when_the_time_runs_out_are_named(self):
+        self.write("a/run.sh", "x")
+        self.write("b/evil.sh", "x")
+        self.write("c/more.sh", "x")
+        now = [0.0]
+        real_scandir = sf.os.scandir
+
+        def scandir_then_run_out(path):
+            now[0] = 100.0  # the budget is gone after the first folder is listed
+            return real_scandir(path)
+
+        with patch.object(sf.time, "monotonic", lambda: now[0]), patch.object(sf.os, "scandir", scandir_then_run_out):
+            files = self.collect()
+        names = {f["path"] for f in files}
+        self.assertTrue({"a/(not walked)", "b/(not walked)", "c/(not walked)"} <= names, names)
+        self.assertTrue(all(f["truncated"] for f in files if f["path"].endswith(sf.NOT_WALKED_NAME)))
+
+    def test_a_full_walk_names_nothing_as_not_walked(self):
+        self.write("a/run.sh", "x")
+        self.write("b/c/d.py", "x")
+        self.assertFalse(any(f["path"].endswith(sf.NOT_WALKED_NAME) for f in self.collect()))
 
     def test_depth_is_capped(self):
         deep = "/".join(f"d{n}" for n in range(sf.MAX_FOLDER_DEPTH + 2))
         self.write(f"{deep}/x.py", "x")
         self.write("top.py", "x")
-        self.assertEqual([f["path"] for f in self.collect()], ["top.py"])
+        too_deep = "/".join(f"d{n}" for n in range(sf.MAX_FOLDER_DEPTH))
+        self.assertEqual([f["path"] for f in self.collect()], ["top.py", f"{too_deep}/{sf.NOT_WALKED_NAME}"])
 
     def test_a_huge_file_is_listed_quickly_without_being_read_whole(self):
         huge = self.skill / "data" / "dump.bin"

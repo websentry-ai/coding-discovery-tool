@@ -27,6 +27,10 @@ MAX_FILES_WITH_CONTENT = 100
 MAX_TOTAL_CONTENT_CHARS = 200_000
 # Past the backend's 1,000 listed files: it picks which to keep, unreadable binaries and scripts first.
 MAX_WALKED_FILES = 5000
+# Stands for a folder the walk could not finish (too deep, too many files, out of time). It has no extension, so
+# the backend treats it as possible unread code and rates the skill at least Medium.
+NOT_WALKED_NAME = "(not walked)"
+MAX_NOT_WALKED_LISTED = 50
 BINARY_HEAD_BYTES = 512  # what the backend reads to tell an image from an executable
 _SNIFF_BYTES = 8192  # a NUL in the first bytes marks a file as binary
 MAX_HASHED_FILE_SIZE = 8 * 1024 * 1024  # bigger files are listed without a sha256
@@ -123,25 +127,45 @@ def _skill_root(skill_md: Path) -> Optional[Path]:
     return root
 
 
+def _not_walked(rel_dir: str) -> Dict:
+    """A name-only entry for a folder the walk never finished, so the backend treats it as unread content."""
+    return {"path": posixpath.join(rel_dir, NOT_WALKED_NAME) if rel_dir else NOT_WALKED_NAME, "size": 0,
+            "truncated": True}
+
+
 def _list_files(root: Path, deadline: float) -> List[Dict]:
-    """Regular files under root (relative POSIX paths and sizes), never following a link; capped in count."""
+    """Regular files under root (relative POSIX paths and sizes), never following a link; folders left unread are named."""
     listed: List[Dict] = []
+    unwalked: List[str] = []  # folders past the depth, count or time limit
     stack = [("", 0)]
-    while stack and len(listed) < MAX_WALKED_FILES and time.monotonic() < deadline:
+    while stack:
+        if len(listed) >= MAX_WALKED_FILES or time.monotonic() >= deadline:
+            unwalked.extend(rel_dir for rel_dir, _ in stack)
+            break
         rel_dir, depth = stack.pop()
         try:
             with os.scandir(os.path.join(str(root), rel_dir)) as entries:
                 entries = sorted(entries, key=lambda e: e.name)
         except OSError:
+            unwalked.append(rel_dir)
             continue
-        for entry in entries:
+        for n, entry in enumerate(entries):
+            if len(listed) >= MAX_WALKED_FILES:
+                # Cut off inside this folder: what it has left goes unread.
+                if any(not is_symlink_or_junction(e.path) for e in entries[n:]):
+                    unwalked.append(rel_dir)
+                break
             if is_symlink_or_junction(entry.path):
                 continue
             rel = posixpath.join(rel_dir, entry.name) if rel_dir else entry.name
             try:
                 if entry.is_dir(follow_symlinks=False):
-                    if entry.name not in SKIP_DIR_NAMES and depth + 1 < MAX_FOLDER_DEPTH:
+                    if entry.name in SKIP_DIR_NAMES:
+                        continue
+                    if depth + 1 < MAX_FOLDER_DEPTH:
                         stack.append((rel, depth + 1))
+                    else:
+                        unwalked.append(rel)
                     continue
                 if not entry.is_file(follow_symlinks=False):
                     continue
@@ -152,9 +176,8 @@ def _list_files(root: Path, deadline: float) -> List[Dict]:
             if (not rel_dir and entry.name.lower() == SKILL_FILE_NAME.lower()) or entry.name.lower() in _SKIP_FILE_NAMES:
                 continue
             listed.append({"path": rel, "size": size})
-            if len(listed) >= MAX_WALKED_FILES:
-                break
-    return listed
+    # Named, not dropped: without these the list would look like the whole folder.
+    return listed + [_not_walked(rel_dir) for rel_dir in sorted(set(unwalked))[:MAX_NOT_WALKED_LISTED]]
 
 
 def _read_file(root: Path, item: Dict, text_room: int, hash_room: int) -> int:
@@ -213,6 +236,8 @@ def collect_skill_files(skill_md: Path) -> Optional[List[Dict]]:
         files = sorted(_list_files(root, deadline), key=lambda f: (file_priority(f["path"]), f["path"]))
         text_budget, hash_budget, with_text = MAX_TOTAL_CONTENT_CHARS, MAX_HASHED_BYTES_PER_FOLDER, 0
         for item in files:
+            if posixpath.basename(item["path"]) == NOT_WALKED_NAME and item.get("truncated"):
+                continue  # a folder left unread, not a file to open
             if time.monotonic() >= deadline:
                 # Listed by name only: the backend scores a folder it could not fully read with care.
                 item["truncated"] = True

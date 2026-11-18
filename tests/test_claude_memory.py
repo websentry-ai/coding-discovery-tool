@@ -746,6 +746,18 @@ class TestMemoryDiscovery(_MemoryHome):
         self.assertEqual([len(call.args[0]["held"]) for call in payload.call_args_list], [1, 0, 0])
         self.assertEqual([folder["counts"].get("url_only_not_sent", 0) for folder in folders], [0, 1, 1])
 
+    def test_url_only_files_over_the_folder_cap_do_not_use_up_what_later_folders_may_hold(self):
+        link_text = "see https://a.example.com\n"
+        for slug, name in (("-a", "one.md"), ("-a", "two.md"), ("-b", "three.md")):
+            _write(_memory_dir(self.home, slug) / name, link_text)
+
+        with patch.object(cmh, "MAX_FLAGGED_FILES_PER_FOLDER", 1), \
+                patch.object(cmh, "MAX_MEMORY_CONTENT_BYTES", 2 * _sent_cost(link_text) + 5):
+            folders = self.collect(url_scan=True)["folders"]
+
+        self.assertEqual([len(folder["flagged"]) for folder in folders], [1, 1])
+        self.assertEqual([folder["counts"].get("url_only_not_sent", 0) for folder in folders], [1, 0])
+
     def test_url_scanning_changes_the_block_hash(self):
         _write(_memory_dir(self.home) / "links.md", "see https://a.example.com\n")
 

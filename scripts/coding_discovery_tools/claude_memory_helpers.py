@@ -320,19 +320,19 @@ def _fits_budget(item: Dict, content_budget: List[int]) -> bool:
     return True
 
 
-def _take(pairs: List[Tuple[Path, Dict]], pick: Dict, index_path: Path, budget: List[int]) -> int:
-    """Moves the (path, item) pairs that fit the budget into pick, capped per folder; returns how many were left out."""
-    left_out = 0
+def _fitting(pairs: List[Tuple[Path, Dict]], used_slots: int, index_path: Path,
+             budget: List[int]) -> List[Tuple[Path, Dict]]:
+    """The (path, item) pairs that fit the budget: the index always may, other files only up to the per-folder cap."""
+    fitting, slots = [], MAX_FLAGGED_FILES_PER_FOLDER - used_slots
     for path, item in pairs:
-        is_index = path == index_path
-        if (is_index or len(pick["sent"]) < MAX_FLAGGED_FILES_PER_FOLDER) and _fits_budget(item, budget):
-            if is_index:
-                pick["index"] = item
-            else:
-                pick["sent"].append(item)
-        else:
-            left_out += 1
-    return left_out
+        if (path == index_path or slots > 0) and _fits_budget(item, budget):
+            fitting.append((path, item))
+            slots -= path != index_path
+    return fitting
+
+
+def _other_files(pairs: List[Tuple[Path, Dict]], index_path: Path) -> List[Dict]:
+    return [item for path, item in pairs if path != index_path]
 
 
 def _scan_folder(folder: Dict, cached_entries: Dict, deadline: float, content_budget: List[int],
@@ -350,19 +350,21 @@ def _scan_folder(folder: Dict, cached_entries: Dict, deadline: float, content_bu
         return None, entries
     index_path = root / INDEX_FILE_NAME
     ordered = sorted(((path, item) for path, _, item in checked if item), key=lambda pair: pair[0] != index_path)
-    pick = {"index": None, "sent": []}
-    not_sent = _take([pair for pair in ordered if pair[1]["findings"]], pick, index_path, content_budget)
+    with_findings = [pair for pair in ordered if pair[1]["findings"]]
     url_only = [pair for pair in ordered if not pair[1]["findings"]]
+    sent = _fitting(with_findings, 0, index_path, content_budget)
     # URL-only files wait for every folder's findings; only as much of them as could ever be sent is kept in memory.
-    held = [pair for pair in url_only if _fits_budget(pair[1], held_budget)]
-    return {"folder": folder, "entries": entries, "index_path": index_path, "pick": pick, "held": held,
-            "not_sent": not_sent, "url_only_dropped": len(url_only) - len(held)}, entries
+    held = _fitting(url_only, len(_other_files(sent, index_path)), index_path, held_budget)
+    return {"folder": folder, "entries": entries, "index_path": index_path, "sent": sent, "held": held,
+            "not_sent": len(with_findings) - len(sent), "url_only_dropped": len(url_only) - len(held)}, entries
 
 
 def _folder_payload(scan: Dict, content_budget: List[int], url_scan: bool) -> Dict:
     """The payload entry of a scanned folder; its held URL-only files take what is left of the budget."""
-    pick = scan["pick"]
-    url_only_not_sent = scan["url_only_dropped"] + _take(scan["held"], pick, scan["index_path"], content_budget)
+    index_path = scan["index_path"]
+    sent_urls = _fitting(scan["held"], len(_other_files(scan["sent"], index_path)), index_path, content_budget)
+    sent = scan["sent"] + sent_urls
+    url_only_not_sent = scan["url_only_dropped"] + len(scan["held"]) - len(sent_urls)
     entries = list(scan["entries"].values())
     flagged = [entry for entry in entries if entry["findings"]]
     url_only = [entry for entry in entries if not entry["findings"] and _sendable(entry, url_scan)]
@@ -371,8 +373,8 @@ def _folder_payload(scan: Dict, content_budget: List[int], url_scan: bool) -> Di
     return {
         **scan["folder"],
         "path": str(scan["folder"]["path"]),
-        "index": pick["index"],
-        "flagged": pick["sent"],
+        "index": next((item for path, item in sent if path == index_path), None),
+        "flagged": _other_files(sent, index_path),
         "counts": {"total": len(entries), "flagged": len(flagged), "clean": len(clean), "truncated": len(truncated),
                    **({"url_only": len(url_only)} if url_only else {}),
                    **({"not_sent": scan["not_sent"]} if scan["not_sent"] else {}),

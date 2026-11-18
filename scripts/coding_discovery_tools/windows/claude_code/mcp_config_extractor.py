@@ -2,7 +2,6 @@
 MCP config extraction for Claude Code on Windows systems.
 """
 
-import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -16,6 +15,8 @@ from ...mcp_extraction_helpers import (
     extract_managed_mcp_config,
     extract_claude_plugin_mcp_configs_with_root_support,
     extract_claudeai_mcp_servers_with_root_support,
+    _read_bounded_json,
+    _CLI_CONFIG_MAX_BYTES,
     is_claude_plugins_path,
 )
 from ...windows_extraction_helpers import should_skip_path
@@ -172,15 +173,9 @@ class WindowsClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
             List of project dicts or empty list if extraction fails
         """
         try:
-            if not config_path.exists():
-                return []
-            content = config_path.read_text(encoding='utf-8', errors='replace')
-            
-            # Parse JSON
-            try:
-                config_data = json.loads(content)
-            except json.JSONDecodeError as e:
-                logger.warning(f"Invalid JSON in MCP config {config_path}: {e}")
+            # A regular file only: a pipe planted here would block the scan.
+            config_data = _read_bounded_json(config_path, None, _CLI_CONFIG_MAX_BYTES)
+            if config_data is None:
                 return []
             
             # Extract only MCP-related configuration

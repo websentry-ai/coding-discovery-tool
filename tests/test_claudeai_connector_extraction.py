@@ -760,6 +760,19 @@ class ClaudeAIUnsafeFileRootScanTest(unittest.TestCase):
         with mock.patch.object(helpers.Path, "home", return_value=self.alice), _must_not_block(self):
             self.assertEqual(helpers._claudeai_names_from_config(self.alice), [])
 
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs FIFO support")
+    def test_claude_code_config_reader_skips_a_pipe(self):
+        from scripts.coding_discovery_tools.linux.claude_code.mcp_config_extractor import (
+            LinuxClaudeMCPConfigExtractor,
+        )
+        from scripts.coding_discovery_tools.macos.claude_code.mcp_config_extractor import (
+            MacOSClaudeMCPConfigExtractor,
+        )
+        os.mkfifo(self.alice / ".claude.json")
+        for extractor in (MacOSClaudeMCPConfigExtractor, LinuxClaudeMCPConfigExtractor):
+            with _must_not_block(self):
+                self.assertEqual(extractor()._extract_from_config_file(self.alice / ".claude.json"), [])
+
     def test_oversize_session_file_is_skipped(self):
         self._cli(self.alice, ["claude.ai Slack"])
         big = _write_session(self._org(self.alice), "local_a.json", [_connector("Slack", tools=SLACK_TOOLS)],

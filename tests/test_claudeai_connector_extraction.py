@@ -14,8 +14,10 @@ each connector's full tool list. The terminal CLI never writes those, so tools
 are attached when present and omitted otherwise.
 """
 
+import contextlib
 import json
 import os
+import signal
 import tempfile
 import time
 import unittest
@@ -55,9 +57,12 @@ class ClaudeAINameSourcesTest(unittest.TestCase):
         self.claude_dir = self.home / ".claude"
         self.claude_dir.mkdir()
         # Default to a platform whose session dir is absent in the temp home.
-        patcher = mock.patch.object(helpers.platform, "system", return_value="Darwin")
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for patcher in (
+            mock.patch.object(helpers.platform, "system", return_value="Darwin"),
+            mock.patch.object(helpers.Path, "home", return_value=self.home),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.addCleanup(self._tmp.cleanup)
 
     def _extract(self):
@@ -163,9 +168,12 @@ class ClaudeAISessionToolsTest(unittest.TestCase):
             self.home / "Library" / "Application Support" / "Claude"
             / "local-agent-mode-sessions"
         )
-        patcher = mock.patch.object(helpers.platform, "system", return_value="Darwin")
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for patcher in (
+            mock.patch.object(helpers.platform, "system", return_value="Darwin"),
+            mock.patch.object(helpers.Path, "home", return_value=self.home),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.addCleanup(self._tmp.cleanup)
         _write_json(self.home / ".claude.json", {
             "claudeAiMcpEverConnected": ["claude.ai Gmail", "claude.ai Spotify"],
@@ -670,6 +678,189 @@ class ClaudeAIDesktopSessionRootScanTest(unittest.TestCase):
         os.mkfifo(org / "local_x.json")
         self._sessions(self.bob, ["Notion"])
         self.assertEqual(self._scan(), {"bob": ["claude.ai Notion"]})
+
+
+@contextlib.contextmanager
+def _must_not_block(test, seconds=3):
+    blocked = []
+
+    def give_up(*_):
+        blocked.append(True)
+        signal.alarm(1)  # re-arm: a reader that swallows this would block on the next pipe
+        raise TimeoutError("blocked on a file that is not a regular file")
+    previous = signal.signal(signal.SIGALRM, give_up)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+    test.assertFalse(blocked, "the scan blocked on a pipe")
+
+
+@contextlib.contextmanager
+def _not_elevated():
+    windows = "scripts.coding_discovery_tools.windows_extraction_helpers."
+    with mock.patch.object(os, "geteuid", return_value=501, create=True), \
+            mock.patch(windows + "windows_admin_state", return_value=False), \
+            mock.patch(windows + "_running_as_local_system", return_value=False):
+        yield
+
+
+class ClaudeAIUnsafeFileRootScanTest(unittest.TestCase):
+    """On a root scan, pipes and links planted in a home are neither waited on nor followed."""
+
+    setUp = ClaudeAIDesktopSessionRootScanTest.setUp
+
+    def _cli(self, home, names):
+        _write_json(home / ".claude.json", {"claudeAiMcpEverConnected": names, "oauthAccount": {"accountUuid": "a"}})
+
+    def _org(self, home):
+        return helpers._claude_app_support_dir(home) / "claude-code-sessions" / "a" / "o"
+
+    def _servers(self):
+        projects = []
+        helpers.extract_claudeai_mcp_servers_with_root_support(projects)
+        return {Path(p["path"]).parent.name: {s["name"]: [t["name"] for t in s.get("scan", {}).get("tools") or []]
+                                              for s in p["mcpServers"]} for p in projects}
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs FIFO support")
+    def test_pipe_among_session_files_is_skipped(self):
+        self._cli(self.alice, ["claude.ai Slack"])
+        _write_session(self._org(self.alice), "local_a.json", [_connector("Slack", tools=SLACK_TOOLS)], self.now - 60)
+        os.mkfifo(self._org(self.alice) / "local_pipe.json")
+        with _must_not_block(self):
+            self.assertEqual(self._servers(), {"alice": {"claude.ai Slack": ["send_message"]}})
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs FIFO support")
+    def test_pipes_in_place_of_config_files_are_skipped(self):
+        for pipe in (self.alice / ".claude.json", self.alice / ".claude" / "mcp-needs-auth-cache.json",
+                     helpers._claude_app_support_dir(self.alice) / "config.json"):
+            pipe.parent.mkdir(parents=True, exist_ok=True)
+            os.mkfifo(pipe)
+        with _must_not_block(self):
+            self.assertFalse(helpers.claude_cli_and_desktop_share_account(self.alice))
+            self.assertEqual(self._servers(), {})
+
+    def test_session_file_linked_into_another_home_gives_no_tools(self):
+        self._cli(self.alice, ["claude.ai Slack"])
+        bob_file = _write_session(self._org(self.bob), "local_b.json", [_connector("Slack", tools=SLACK_TOOLS)],
+                                  self.now - 60)
+        self._org(self.alice).mkdir(parents=True)
+        try:
+            os.symlink(bob_file, self._org(self.alice) / "local_x.json")
+        except (OSError, NotImplementedError):
+            self.skipTest("cannot create symlinks here")
+        self.assertEqual(self._servers(), {"alice": {"claude.ai Slack": []}})
+
+    def test_cli_config_linked_into_another_home_is_not_read(self):
+        self._cli(self.bob, ["claude.ai BobOnly"])
+        try:
+            os.symlink(self.bob / ".claude.json", self.alice / ".claude.json")
+        except (OSError, NotImplementedError):
+            self.skipTest("cannot create symlinks here")
+        self.assertEqual(self._servers(), {"bob": {"claude.ai BobOnly": []}})
+
+    def test_claude_code_config_must_be_a_file_of_its_own_home(self):
+        bobs = _write_json(self.bob / ".claude.json", {"mcpServers": {"bobs": {}}})
+        mine = _write_json(self.alice / "dotfiles" / "claude.json", {"mcpServers": {"mine": {}}})
+        config = self.alice / ".claude.json"
+        cases = (("link out of the home", os.symlink, bobs, None),
+                 ("hard link to another user's file", os.link, bobs, None),
+                 ("link inside the home", os.symlink, mine, {"mcpServers": {"mine": {}}}))
+        for label, make_link, target, expected in cases:
+            with self.subTest(label):
+                if os.path.lexists(config):
+                    config.unlink()
+                try:
+                    make_link(target, config)
+                except (OSError, NotImplementedError):
+                    self.skipTest("cannot create links here")
+                self.assertEqual(helpers.read_claude_code_config(config), expected)
+
+    def test_claude_code_config_owned_by_another_account_is_still_read(self):
+        _write_json(self.alice / ".claude.json",
+                    {"mcpServers": {"mine": {}}, "claudeAiMcpEverConnected": ["claude.ai X"]})
+        self.assertEqual(helpers._claudeai_names_from_config(self.alice), ["claude.ai X"])
+        with mock.patch("scripts.coding_discovery_tools.path_containment._owner_uid", return_value=-1):
+            self.assertEqual(helpers.read_claude_code_config(self.alice / ".claude.json")["mcpServers"], {"mine": {}})
+            self.assertEqual(helpers._claudeai_names_from_config(self.alice), [])
+
+    def _own_home_local_servers(self):
+        from scripts.coding_discovery_tools.macos.claude_code.mcp_config_extractor import (
+            MacOSClaudeMCPConfigExtractor,
+        )
+        with mock.patch.object(helpers.Path, "home", return_value=self.alice), _not_elevated(), \
+                mock.patch.object(helpers, "_iter_admin_user_homes", return_value=[]):
+            projects = helpers.extract_dual_path_configs_with_root_support(
+                self.alice / ".claude.json", self.alice / ".claude" / "mcp.json",
+                MacOSClaudeMCPConfigExtractor()._extract_from_config_file)
+        return [s["name"] for p in projects for s in p["mcpServers"]]
+
+    def test_unreadable_claude_code_config_gives_way_to_the_fallback(self):
+        main = self.alice / ".claude.json"
+        _write_json(self.alice / ".claude" / "mcp.json", {"mcpServers": {"fallback": {"command": "b"}}})
+        _write_json(main, {"mcpServers": {"main": {"command": "a"}}, "pad": "x" * 4096})
+        self.assertEqual(self._own_home_local_servers(), ["main"])
+        with mock.patch.object(helpers, "_CLI_CONFIG_MAX_BYTES", 1024):
+            self.assertEqual(self._own_home_local_servers(), ["fallback"], "oversize")
+        main.write_text('{"mcpServers": {"ma', encoding="utf-8")
+        self.assertEqual(self._own_home_local_servers(), ["fallback"], "malformed")
+        _write_json(main, {"projects": {}})
+        self.assertEqual(self._own_home_local_servers(), [], "read fine, no servers: fallback stays unused")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs FIFO support")
+    def test_pipe_in_place_of_claude_code_config_gives_way_to_the_fallback(self):
+        _write_json(self.alice / ".claude" / "mcp.json", {"mcpServers": {"fallback": {"command": "b"}}})
+        os.mkfifo(self.alice / ".claude.json")
+        with _must_not_block(self):
+            self.assertEqual(self._own_home_local_servers(), ["fallback"])
+
+    def test_own_home_scan_still_follows_a_linked_cli_config(self):
+        self._cli(self.bob, ["claude.ai Mine"])
+        try:
+            os.symlink(self.bob / ".claude.json", self.alice / ".claude.json")
+        except (OSError, NotImplementedError):
+            self.skipTest("cannot create symlinks here")
+        with mock.patch.object(helpers.Path, "home", return_value=self.alice), _not_elevated():
+            self.assertEqual(helpers._claudeai_names_from_config(self.alice), ["claude.ai Mine"])
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs FIFO support")
+    def test_own_home_scan_skips_a_pipe_in_place_of_the_cli_config(self):
+        os.mkfifo(self.alice / ".claude.json")
+        with mock.patch.object(helpers.Path, "home", return_value=self.alice), _not_elevated(), _must_not_block(self):
+            self.assertEqual(helpers._claudeai_names_from_config(self.alice), [])
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs FIFO support")
+    def test_claude_code_config_reader_skips_a_pipe(self):
+        from scripts.coding_discovery_tools.linux.claude_code.mcp_config_extractor import (
+            LinuxClaudeMCPConfigExtractor,
+        )
+        from scripts.coding_discovery_tools.macos.claude_code.mcp_config_extractor import (
+            MacOSClaudeMCPConfigExtractor,
+        )
+        os.mkfifo(self.alice / ".claude.json")
+        for extractor in (MacOSClaudeMCPConfigExtractor, LinuxClaudeMCPConfigExtractor):
+            with _must_not_block(self):
+                self.assertEqual(extractor()._extract_from_config_file(self.alice / ".claude.json"), [])
+
+    def test_windows_admin_or_system_scan_of_own_home_is_contained(self):
+        windows = "scripts.coding_discovery_tools.windows_extraction_helpers."
+        for admin, system, contained in ((True, False, True), (None, True, True), (False, False, False)):
+            with self.subTest(admin=admin, system=system), \
+                    mock.patch.object(helpers.platform, "system", return_value="Windows"), \
+                    mock.patch.object(helpers.Path, "home", return_value=self.alice), \
+                    mock.patch(windows + "windows_admin_state", return_value=admin), \
+                    mock.patch(windows + "_running_as_local_system", return_value=system):
+                self.assertEqual(helpers._scans_another_users_home(self.alice), contained)
+
+    def test_oversize_session_file_is_skipped(self):
+        self._cli(self.alice, ["claude.ai Slack"])
+        big = _write_session(self._org(self.alice), "local_a.json", [_connector("Slack", tools=SLACK_TOOLS)],
+                             self.now - 60)
+        payload = json.loads(big.read_text(encoding="utf-8"))
+        big.write_text(json.dumps({**payload, "padding": "x" * (helpers._SESSION_MAX_BYTES + 1)}), encoding="utf-8")
+        self.assertEqual(self._servers(), {"alice": {"claude.ai Slack": []}})
 
 
 STALE = ["claude.ai Gmail", "claude.ai Vercel", "claude.ai Linear"]

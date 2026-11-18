@@ -2622,6 +2622,13 @@ def extract_dual_path_configs_with_root_support(
         except ImportError:
             pass
 
+    def own_home_projects() -> List[Dict]:
+        projects = extract_from_file_func(preferred_path) if preferred_path.exists() else []
+        # The fallback is for a preferred config that is missing or unreadable, not one read with no servers.
+        if not projects and fallback_path.exists() and _config_unusable(preferred_path):
+            projects = extract_from_file_func(fallback_path)
+        return projects or []
+
     # When running as admin/root, check all users
     admin_homes = _iter_admin_user_homes(is_admin, users_dir)
     if admin_homes:
@@ -2652,24 +2659,10 @@ def extract_dual_path_configs_with_root_support(
         # admin_homes, so re-adding it would double-count (WEB-4673) — skip then.
         import platform as _platform
         if _platform.system() != "Linux" and not _own_home_already_scanned(admin_homes):
-            if preferred_path.exists():
-                root_projects = extract_from_file_func(preferred_path)
-                if root_projects:
-                    all_projects.extend(root_projects)
-            elif fallback_path.exists():
-                root_projects = extract_from_file_func(fallback_path)
-                if root_projects:
-                    all_projects.extend(root_projects)
+            all_projects.extend(own_home_projects())
     else:
         # For regular users, check their own home directory
-        if preferred_path.exists():
-            user_projects = extract_from_file_func(preferred_path)
-            if user_projects:
-                all_projects.extend(user_projects)
-        elif fallback_path.exists():
-            user_projects = extract_from_file_func(fallback_path)
-            if user_projects:
-                all_projects.extend(user_projects)
+        all_projects.extend(own_home_projects())
     
     return all_projects
 
@@ -2740,18 +2733,45 @@ def _claude_app_support_dir(home: Path) -> Path:
     return home / ".config" / "Claude"
 
 
-def _read_json_dict(path: Path) -> Dict[str, Any]:
-    """Parse `path` as a JSON object, or return {} for anything unreadable."""
+def _scans_another_users_home(home: Path) -> bool:
+    """True for any elevated scan too: root, or a Windows administrator or SYSTEM."""
+    if platform.system() == "Windows":
+        from .windows_extraction_helpers import _running_as_local_system, windows_admin_state
+        elevated = bool(windows_admin_state()) or _running_as_local_system()
+    else:
+        elevated = hasattr(os, "geteuid") and os.geteuid() == 0
+    return elevated or os.path.realpath(str(home)) != os.path.realpath(str(Path.home()))
+
+
+def _config_unusable(config_path: Path) -> bool:
+    """True when `config_path` is missing or cannot be read as Claude Code's config."""
+    return not config_path.exists() or read_claude_code_config(config_path) is None
+
+
+def read_claude_code_config(config_path: Path) -> Any:
+    """Claude Code's `~/.claude.json` or `~/.claude/mcp.json` as JSON, else None."""
+    home = config_path.parent.parent if config_path.parent.name == ".claude" else config_path.parent
+    if not _scans_another_users_home(home):
+        return _read_bounded_json(config_path, None, _CLI_CONFIG_MAX_BYTES)
+    from .path_containment import owned_boundary
+    home_real = owned_boundary(home, home)
+    if home_real is None:
+        return None
+    # Resolved first so an in-home link is still read; the owner check is skipped for a `sudo claude` config.
+    target = Path(os.path.realpath(str(config_path)))
+    return _read_bounded_json(target, home_real, _CLI_CONFIG_MAX_BYTES, check_owner=False)
+
+
+def _read_json_dict(path: Path, home: Path, max_bytes: int) -> Dict[str, Any]:
+    """Parse `path` as a JSON object, or {}; a regular file only, and inside `home` when scanning another user."""
     try:
-        parsed = json.loads(path.read_text(encoding='utf-8', errors='replace'))
-    except FileNotFoundError:
-        return {}
-    except json.JSONDecodeError as e:
-        logger.debug(f"Invalid JSON in {path}: {e}")
-        return {}
-    except PermissionError as e:
-        logger.debug(f"Permission denied reading {path}: {e}")
-        return {}
+        boundary_real = None
+        if _scans_another_users_home(home):
+            from .path_containment import owned_boundary
+            boundary_real = owned_boundary(home, path.parent)
+            if boundary_real is None:
+                return {}
+        parsed = _read_bounded_json(path, boundary_real, max_bytes)
     except Exception as e:
         logger.debug(f"Error reading {path}: {e}")
         return {}
@@ -2767,7 +2787,8 @@ def _claudeai_names_from_auth_cache(claude_dir: Path) -> List[str]:
     """Connector names from ~/.claude/mcp-needs-auth-cache.json. Only holds the
     connectors pending authentication, so it misses every one the user has
     already signed into."""
-    return _claudeai_names(_read_json_dict(claude_dir / "mcp-needs-auth-cache.json"))
+    cache = _read_json_dict(claude_dir / "mcp-needs-auth-cache.json", claude_dir.parent, _SESSION_MAX_BYTES)
+    return _claudeai_names(cache)
 
 
 def _claudeai_names_from_config(home: Path) -> List[str]:
@@ -2775,7 +2796,8 @@ def _claudeai_names_from_config(home: Path) -> List[str]:
     the CLI maintains for every claude.ai connector it has connected to —
     authenticated ones included. Ever-connected, so a since-disconnected
     connector still appears."""
-    ever_connected = _read_json_dict(home / ".claude.json").get("claudeAiMcpEverConnected")
+    config = _read_json_dict(home / ".claude.json", home, _CLI_CONFIG_MAX_BYTES)
+    ever_connected = config.get("claudeAiMcpEverConnected")
     return _claudeai_names(ever_connected) if isinstance(ever_connected, list) else []
 
 
@@ -2794,30 +2816,31 @@ def _claudeai_session_tools(home: Path) -> Dict[str, Dict[str, Any]]:
     hook-reported one for the same connector.
     """
     base = _claude_app_support_dir(home)
-    files: List[Path] = []
+    contained = _scans_another_users_home(home)
+    stamped: List[Tuple[float, Path, Optional[str]]] = []
     for sub in _CLAUDE_SESSION_SUBDIRS:
         folder = base / sub
+        boundary_real = None
+        if contained:
+            from .path_containment import owned_boundary
+            boundary_real = owned_boundary(home, folder)
+            if boundary_real is None:
+                continue
         try:
-            if folder.is_dir():
-                files.extend(folder.glob("**/local_*.json"))
+            files = list(folder.glob("**/local_*.json")) if folder.is_dir() else []
         except OSError as e:
             logger.debug(f"Error listing Claude session folder {folder}: {e}")
-
-    stamped: List[Tuple[float, Path]] = []
-    for f in files:
-        try:
-            stamped.append((f.stat().st_mtime, f))
-        except OSError:
             continue
-    stamped.sort(key=lambda pair: pair[0], reverse=True)
+        for f in files:
+            try:
+                stamped.append((f.stat().st_mtime, f, boundary_real))
+            except OSError:
+                continue
+    stamped.sort(key=lambda item: item[0], reverse=True)
 
     out: Dict[str, Dict[str, Any]] = {}
-    for mtime, f in stamped:
-        try:
-            data = json.loads(f.read_text(encoding='utf-8', errors='replace'))
-        except (OSError, ValueError) as e:
-            logger.debug(f"Error reading Claude session file {f}: {e}")
-            continue
+    for mtime, f, boundary_real in stamped:
+        data = _read_bounded_json(f, boundary_real)
         if not isinstance(data, dict):
             continue
         for entry in (data.get("remoteMcpServersConfig") or []):
@@ -2901,9 +2924,10 @@ def extract_claudeai_mcp_servers(claude_dir: Path, projects: List[Dict]) -> None
 
 def claude_cli_and_desktop_share_account(home: Path) -> bool:
     """True only when CLI and desktop app under `home` have the same account id."""
-    cli_account = _read_json_dict(home / ".claude.json").get("oauthAccount")
+    cli_account = _read_json_dict(home / ".claude.json", home, _CLI_CONFIG_MAX_BYTES).get("oauthAccount")
     cli_account_uuid = cli_account.get("accountUuid") if isinstance(cli_account, dict) else None
-    desktop_account_uuid = _read_json_dict(_claude_app_support_dir(home) / "config.json").get("lastKnownAccountUuid")
+    desktop_config = _read_json_dict(_claude_app_support_dir(home) / "config.json", home, _SESSION_MAX_BYTES)
+    desktop_account_uuid = desktop_config.get("lastKnownAccountUuid")
     if not cli_account_uuid or not desktop_account_uuid:
         logger.debug(f"claude.ai connectors not mirrored for {home}: account id missing")
         return False
@@ -2923,14 +2947,16 @@ _CLI_CONFIG_MAX_BYTES = 64 * 1024 * 1024
 _BUILTIN_REMOTE_CONNECTORS = (("visualize", "sandbox.claudemcpcontent.com"),)
 
 
-def _read_bounded_json(file: Path, boundary_real: Optional[str], max_bytes: int = _SESSION_MAX_BYTES) -> Any:
+def _read_bounded_json(
+    file: Path, boundary_real: Optional[str], max_bytes: int = _SESSION_MAX_BYTES, check_owner: bool = True
+) -> Any:
     """Parse a regular file of at most `max_bytes` as JSON, else None; with a boundary it must live inside it."""
     try:
         if boundary_real is None:
             fd = os.open(str(file), os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
         else:
             from .path_containment import open_contained
-            fd = open_contained(file, boundary_real)
+            fd = open_contained(file, boundary_real, check_owner)
         with os.fdopen(fd, "rb") as handle:
             status = os.fstat(handle.fileno())
             if not stat.S_ISREG(status.st_mode) or status.st_size > max_bytes:
@@ -2986,8 +3012,7 @@ def _desktop_account_folder(app_dir: Path, owner_home: Path, contained: bool) ->
 def _newest_desktop_session_connectors(home: Path) -> Optional[Tuple[float, List[Any]]]:
     """(mtime, `remoteMcpServersConfig`) of the newest session file from the last 30 days that has one."""
     app_dir = _claude_app_support_dir(home)
-    running_as_root = hasattr(os, "geteuid") and os.geteuid() == 0
-    contained = running_as_root or os.path.realpath(str(home)) != os.path.realpath(str(Path.home()))
+    contained = _scans_another_users_home(home)
     account = _desktop_account_folder(app_dir, home, contained)
 
     session_roots: List[Tuple[Path, Optional[str]]] = []
@@ -3283,16 +3308,13 @@ def _is_contained(path: Path, root: Path) -> bool:
     return True
 
 
-def _read_plugin_json(path: Path) -> Optional[Any]:
+def _read_plugin_json(
+    path: Path, boundary_real: Optional[str] = None, max_bytes: int = _SESSION_MAX_BYTES
+) -> Optional[Any]:
     """Parse a plugin JSON file. None when absent, unreadable or malformed."""
-    try:
-        if path.is_file():
-            return json.loads(path.read_text(encoding='utf-8', errors='replace'))
-    except (json.JSONDecodeError, PermissionError, OSError) as exc:
-        logger.debug(f"Plugin MCP source unreadable {path}: {exc}")
-    except Exception as exc:
-        logger.debug(f"Unexpected error reading plugin MCP source {path}: {exc}")
-    return None
+    # Resolved first, so a link that stays inside the boundary is still read.
+    target = Path(os.path.realpath(str(path))) if boundary_real is not None else path
+    return _read_bounded_json(target, boundary_real, max_bytes)
 
 
 def _server_entries_from_root_map(data: Dict) -> Dict:
@@ -3309,17 +3331,19 @@ def _server_entries_from_root_map(data: Dict) -> Dict:
     }
 
 
-def _resolve_relative_mcp_servers(value: str, plugin_dir: Path) -> Optional[Dict]:
+def _resolve_relative_mcp_servers(
+    value: str, plugin_dir: Path, boundary_real: Optional[str] = None
+) -> Optional[Dict]:
     """Follow a ``mcpServers`` that names another file instead of inlining a map."""
     candidate = plugin_dir / value
     if not _is_contained(candidate, plugin_dir):
         return None
-    data = _read_plugin_json(candidate)
+    data = _read_plugin_json(candidate, boundary_real)
     servers = data.get('mcpServers') if isinstance(data, dict) else None
     return servers if isinstance(servers, dict) else None
 
 
-def _plugin_mcp_server_map(plugin_dir: Path) -> Dict:
+def _plugin_mcp_server_map(plugin_dir: Path, boundary_real: Optional[str] = None) -> Dict:
     """``{server_name: config}`` declared by the plugin rooted at ``plugin_dir``.
 
     First source to declare a name wins. The bare root ``plugin.json`` is not
@@ -3335,7 +3359,7 @@ def _plugin_mcp_server_map(plugin_dir: Path) -> Dict:
         if not _is_contained(source, plugin_dir):
             logger.debug(f"Plugin MCP source escapes its plugin dir: {source}")
             continue
-        data = _read_plugin_json(source)
+        data = _read_plugin_json(source, boundary_real)
         if not isinstance(data, dict):
             continue
 
@@ -3345,7 +3369,7 @@ def _plugin_mcp_server_map(plugin_dir: Path) -> Dict:
         if not mcp_servers and source.name == '.mcp.json':
             mcp_servers = _server_entries_from_root_map(data) or None
         if isinstance(mcp_servers, str):
-            mcp_servers = _resolve_relative_mcp_servers(mcp_servers, plugin_dir)
+            mcp_servers = _resolve_relative_mcp_servers(mcp_servers, plugin_dir, boundary_real)
 
         if isinstance(mcp_servers, dict):
             for key, entry in mcp_servers.items():
@@ -3370,27 +3394,30 @@ def _select_plugin_version_dir(plugin_dir: Path) -> Optional[Path]:
         return None
 
 
-def _installed_plugins_registry(plugins_root: Path) -> Optional[Dict]:
+def _installed_plugins_registry(plugins_root: Path, boundary_real: Optional[str] = None) -> Optional[Dict]:
     """The ``plugins`` map, ``None`` when the file is missing or malformed.
 
     An empty map means every plugin was uninstalled, not "no registry" — the
     latter would resurrect the cache's leftovers. ``version`` is not gated on:
     a bumped file would otherwise drop every plugin.
     """
-    data = _read_plugin_json(plugins_root / "installed_plugins.json")
+    # The larger limit: skipping a big registry would bring uninstalled plugins back from the cache.
+    data = _read_plugin_json(plugins_root / "installed_plugins.json", boundary_real, _CLI_CONFIG_MAX_BYTES)
     plugins = data.get("plugins") if isinstance(data, dict) else None
     return plugins if isinstance(plugins, dict) else None
 
 
-def _marketplace_registry(plugins_root: Path) -> Dict:
+def _marketplace_registry(plugins_root: Path, boundary_real: Optional[str] = None) -> Dict:
     """``known_marketplaces.json`` keyed by marketplace name."""
-    data = _read_plugin_json(plugins_root / "known_marketplaces.json")
+    data = _read_plugin_json(plugins_root / "known_marketplaces.json", boundary_real, _CLI_CONFIG_MAX_BYTES)
     return data if isinstance(data, dict) else {}
 
 
-def _directory_marketplace_plugin_dir(location: Path, plugin: str) -> Optional[Path]:
+def _directory_marketplace_plugin_dir(
+    location: Path, plugin: str, boundary_real: Optional[str] = None
+) -> Optional[Path]:
     """The dir a directory-source marketplace's manifest assigns to ``plugin``."""
-    manifest = _read_plugin_json(location / ".claude-plugin" / "marketplace.json")
+    manifest = _read_plugin_json(location / ".claude-plugin" / "marketplace.json", boundary_real)
     if not isinstance(manifest, dict):
         return None
     for entry in (manifest.get("plugins") or []):
@@ -3415,6 +3442,7 @@ def _authoritative_plugin_dirs(
     plugin: str,
     marketplace_info: Dict,
     installed_entries: List,
+    boundary_real: Optional[str] = None,
 ) -> List[Path]:
     """Every dir that may hold ``plugin``, most authoritative first.
 
@@ -3437,7 +3465,7 @@ def _authoritative_plugin_dirs(
         for candidate in (
             location / "plugins" / plugin,
             location / plugin,
-            _directory_marketplace_plugin_dir(location, plugin),
+            _directory_marketplace_plugin_dir(location, plugin, boundary_real),
         ):
             if candidate is not None and candidate not in dirs:
                 dirs.append(candidate)
@@ -3516,16 +3544,17 @@ def _extract_registered_plugin_mcp(
     plugins_root: Path,
     projects: List[Dict],
     plugin_lookup: Optional[Dict[str, Dict]] = None,
+    boundary_real: Optional[str] = None,
 ) -> bool:
     """Resolve plugin MCP servers through the installed-plugins registry.
 
     False when the registry is unusable, so the caller falls back to disk.
     """
-    installed = _installed_plugins_registry(plugins_root)
+    installed = _installed_plugins_registry(plugins_root, boundary_real)
     if installed is None:
         return False
 
-    marketplaces = _marketplace_registry(plugins_root)
+    marketplaces = _marketplace_registry(plugins_root, boundary_real)
 
     for plugin_id, entries in installed.items():
         plugin, _, marketplace = str(plugin_id).partition('@')
@@ -3534,8 +3563,8 @@ def _extract_registered_plugin_mcp(
         marketplace_info = marketplaces.get(marketplace) or {}
         entry_list = entries if isinstance(entries, list) else []
 
-        for plugin_dir in _authoritative_plugin_dirs(plugin, marketplace_info, entry_list):
-            servers = _plugin_mcp_server_map(plugin_dir)
+        for plugin_dir in _authoritative_plugin_dirs(plugin, marketplace_info, entry_list, boundary_real):
+            servers = _plugin_mcp_server_map(plugin_dir, boundary_real)
             if not servers:
                 continue
             # First dir that declares the servers wins; later ones repeat them.
@@ -3551,6 +3580,7 @@ def _scan_plugin_cache_dir(
     cache_dir: Path,
     projects: List[Dict],
     plugin_lookup: Optional[Dict[str, Dict]] = None,
+    boundary_real: Optional[str] = None,
 ) -> None:
     """
     Scan the plugin cache directory for MCP configs.
@@ -3577,7 +3607,7 @@ def _scan_plugin_cache_dir(
                     version_dir = _select_plugin_version_dir(plugin_dir)
                     if version_dir is None:
                         continue
-                    servers = _plugin_mcp_server_map(version_dir)
+                    servers = _plugin_mcp_server_map(version_dir, boundary_real)
                     if servers:
                         _append_plugin_project(
                             version_dir, plugin_dir.name, servers, projects,
@@ -3606,14 +3636,25 @@ def _extract_plugin_mcp_for_dir(
     if not plugins_dir.exists() or not plugins_dir.is_dir():
         return
 
-    if _extract_registered_plugin_mcp(plugins_dir, projects, plugin_lookup=plugin_lookup):
+    owner_home = plugins_dir.parent.parent
+    boundary_real = None
+    if _scans_another_users_home(owner_home):
+        from .path_containment import owned_boundary
+        # The home is the read boundary: a plugin may be installed anywhere inside it.
+        boundary_real = owned_boundary(owner_home, owner_home) if owned_boundary(owner_home, plugins_dir) else None
+        if boundary_real is None:
+            return
+
+    if _extract_registered_plugin_mcp(
+        plugins_dir, projects, plugin_lookup=plugin_lookup, boundary_real=boundary_real
+    ):
         return
 
     try:
         for plugin_dir in plugins_dir.iterdir():
             if not plugin_dir.is_dir():
                 continue
-            servers = _plugin_mcp_server_map(plugin_dir)
+            servers = _plugin_mcp_server_map(plugin_dir, boundary_real)
             if servers:
                 _append_plugin_project(
                     plugin_dir, plugin_dir.name, servers, projects,
@@ -3624,7 +3665,9 @@ def _extract_plugin_mcp_for_dir(
     except Exception as e:
         logger.debug(f"Error extracting plugin MCP configs: {e}")
 
-    _scan_plugin_cache_dir(plugins_dir / "cache", projects, plugin_lookup=plugin_lookup)
+    _scan_plugin_cache_dir(
+        plugins_dir / "cache", projects, plugin_lookup=plugin_lookup, boundary_real=boundary_real
+    )
 
 
 def extract_claude_plugin_mcp_configs(

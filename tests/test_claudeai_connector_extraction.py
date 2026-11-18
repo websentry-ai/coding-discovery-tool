@@ -14,8 +14,10 @@ each connector's full tool list. The terminal CLI never writes those, so tools
 are attached when present and omitted otherwise.
 """
 
+import contextlib
 import json
 import os
+import signal
 import tempfile
 import time
 import unittest
@@ -669,6 +671,102 @@ class ClaudeAIDesktopSessionRootScanTest(unittest.TestCase):
         os.mkfifo(org / "local_x.json")
         self._sessions(self.bob, ["Notion"])
         self.assertEqual(self._scan(), {"bob": ["claude.ai Notion"]})
+
+
+@contextlib.contextmanager
+def _must_not_block(test, seconds=3):
+    blocked = []
+
+    def give_up(*_):
+        blocked.append(True)
+        signal.alarm(1)  # re-arm: a reader that swallows this would block on the next pipe
+        raise TimeoutError("blocked on a file that is not a regular file")
+    previous = signal.signal(signal.SIGALRM, give_up)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+    test.assertFalse(blocked, "the scan blocked on a pipe")
+
+
+class ClaudeAIUnsafeFileRootScanTest(unittest.TestCase):
+    """On a root scan, pipes and links planted in a home are neither waited on nor followed."""
+
+    setUp = ClaudeAIDesktopSessionRootScanTest.setUp
+
+    def _cli(self, home, names):
+        _write_json(home / ".claude.json", {"claudeAiMcpEverConnected": names, "oauthAccount": {"accountUuid": "a"}})
+
+    def _org(self, home):
+        return helpers._claude_app_support_dir(home) / "claude-code-sessions" / "a" / "o"
+
+    def _servers(self):
+        projects = []
+        helpers.extract_claudeai_mcp_servers_with_root_support(projects)
+        return {Path(p["path"]).parent.name: {s["name"]: [t["name"] for t in s.get("scan", {}).get("tools") or []]
+                                              for s in p["mcpServers"]} for p in projects}
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs FIFO support")
+    def test_pipe_among_session_files_is_skipped(self):
+        self._cli(self.alice, ["claude.ai Slack"])
+        _write_session(self._org(self.alice), "local_a.json", [_connector("Slack", tools=SLACK_TOOLS)], self.now - 60)
+        os.mkfifo(self._org(self.alice) / "local_pipe.json")
+        with _must_not_block(self):
+            self.assertEqual(self._servers(), {"alice": {"claude.ai Slack": ["send_message"]}})
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs FIFO support")
+    def test_pipes_in_place_of_config_files_are_skipped(self):
+        for pipe in (self.alice / ".claude.json", self.alice / ".claude" / "mcp-needs-auth-cache.json",
+                     helpers._claude_app_support_dir(self.alice) / "config.json"):
+            pipe.parent.mkdir(parents=True, exist_ok=True)
+            os.mkfifo(pipe)
+        with _must_not_block(self):
+            self.assertFalse(helpers.claude_cli_and_desktop_share_account(self.alice))
+            self.assertEqual(self._servers(), {})
+
+    def test_session_file_linked_into_another_home_gives_no_tools(self):
+        self._cli(self.alice, ["claude.ai Slack"])
+        bob_file = _write_session(self._org(self.bob), "local_b.json", [_connector("Slack", tools=SLACK_TOOLS)],
+                                  self.now - 60)
+        self._org(self.alice).mkdir(parents=True)
+        try:
+            os.symlink(bob_file, self._org(self.alice) / "local_x.json")
+        except (OSError, NotImplementedError):
+            self.skipTest("cannot create symlinks here")
+        self.assertEqual(self._servers(), {"alice": {"claude.ai Slack": []}})
+
+    def test_cli_config_linked_into_another_home_is_not_read(self):
+        self._cli(self.bob, ["claude.ai BobOnly"])
+        try:
+            os.symlink(self.bob / ".claude.json", self.alice / ".claude.json")
+        except (OSError, NotImplementedError):
+            self.skipTest("cannot create symlinks here")
+        self.assertEqual(self._servers(), {"bob": {"claude.ai BobOnly": []}})
+
+    def test_own_home_scan_still_follows_a_linked_cli_config(self):
+        self._cli(self.bob, ["claude.ai Mine"])
+        try:
+            os.symlink(self.bob / ".claude.json", self.alice / ".claude.json")
+        except (OSError, NotImplementedError):
+            self.skipTest("cannot create symlinks here")
+        with mock.patch.object(helpers.Path, "home", return_value=self.alice):
+            self.assertEqual(helpers._claudeai_names_from_config(self.alice), ["claude.ai Mine"])
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "needs FIFO support")
+    def test_own_home_scan_skips_a_pipe_in_place_of_the_cli_config(self):
+        os.mkfifo(self.alice / ".claude.json")
+        with mock.patch.object(helpers.Path, "home", return_value=self.alice), _must_not_block(self):
+            self.assertEqual(helpers._claudeai_names_from_config(self.alice), [])
+
+    def test_oversize_session_file_is_skipped(self):
+        self._cli(self.alice, ["claude.ai Slack"])
+        big = _write_session(self._org(self.alice), "local_a.json", [_connector("Slack", tools=SLACK_TOOLS)],
+                             self.now - 60)
+        payload = json.loads(big.read_text(encoding="utf-8"))
+        big.write_text(json.dumps({**payload, "padding": "x" * (helpers._SESSION_MAX_BYTES + 1)}), encoding="utf-8")
+        self.assertEqual(self._servers(), {"alice": {"claude.ai Slack": []}})
 
 
 if __name__ == "__main__":

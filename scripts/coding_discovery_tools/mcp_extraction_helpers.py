@@ -2740,18 +2740,21 @@ def _claude_app_support_dir(home: Path) -> Path:
     return home / ".config" / "Claude"
 
 
-def _read_json_dict(path: Path) -> Dict[str, Any]:
-    """Parse `path` as a JSON object, or return {} for anything unreadable."""
+def _scans_another_users_home(home: Path) -> bool:
+    running_as_root = hasattr(os, "geteuid") and os.geteuid() == 0
+    return running_as_root or os.path.realpath(str(home)) != os.path.realpath(str(Path.home()))
+
+
+def _read_json_dict(path: Path, home: Path, max_bytes: int) -> Dict[str, Any]:
+    """Parse `path` as a JSON object, or {}; a regular file only, and inside `home` when scanning another user."""
     try:
-        parsed = json.loads(path.read_text(encoding='utf-8', errors='replace'))
-    except FileNotFoundError:
-        return {}
-    except json.JSONDecodeError as e:
-        logger.debug(f"Invalid JSON in {path}: {e}")
-        return {}
-    except PermissionError as e:
-        logger.debug(f"Permission denied reading {path}: {e}")
-        return {}
+        boundary_real = None
+        if _scans_another_users_home(home):
+            from .path_containment import owned_boundary
+            boundary_real = owned_boundary(home, path.parent)
+            if boundary_real is None:
+                return {}
+        parsed = _read_bounded_json(path, boundary_real, max_bytes)
     except Exception as e:
         logger.debug(f"Error reading {path}: {e}")
         return {}
@@ -2767,7 +2770,8 @@ def _claudeai_names_from_auth_cache(claude_dir: Path) -> List[str]:
     """Connector names from ~/.claude/mcp-needs-auth-cache.json. Only holds the
     connectors pending authentication, so it misses every one the user has
     already signed into."""
-    return _claudeai_names(_read_json_dict(claude_dir / "mcp-needs-auth-cache.json"))
+    cache = _read_json_dict(claude_dir / "mcp-needs-auth-cache.json", claude_dir.parent, _SESSION_MAX_BYTES)
+    return _claudeai_names(cache)
 
 
 def _claudeai_names_from_config(home: Path) -> List[str]:
@@ -2775,7 +2779,8 @@ def _claudeai_names_from_config(home: Path) -> List[str]:
     the CLI maintains for every claude.ai connector it has connected to —
     authenticated ones included. Ever-connected, so a since-disconnected
     connector still appears."""
-    ever_connected = _read_json_dict(home / ".claude.json").get("claudeAiMcpEverConnected")
+    config = _read_json_dict(home / ".claude.json", home, _CLI_CONFIG_MAX_BYTES)
+    ever_connected = config.get("claudeAiMcpEverConnected")
     return _claudeai_names(ever_connected) if isinstance(ever_connected, list) else []
 
 
@@ -2794,30 +2799,31 @@ def _claudeai_session_tools(home: Path) -> Dict[str, Dict[str, Any]]:
     hook-reported one for the same connector.
     """
     base = _claude_app_support_dir(home)
-    files: List[Path] = []
+    contained = _scans_another_users_home(home)
+    stamped: List[Tuple[float, Path, Optional[str]]] = []
     for sub in _CLAUDE_SESSION_SUBDIRS:
         folder = base / sub
+        boundary_real = None
+        if contained:
+            from .path_containment import owned_boundary
+            boundary_real = owned_boundary(home, folder)
+            if boundary_real is None:
+                continue
         try:
-            if folder.is_dir():
-                files.extend(folder.glob("**/local_*.json"))
+            files = list(folder.glob("**/local_*.json")) if folder.is_dir() else []
         except OSError as e:
             logger.debug(f"Error listing Claude session folder {folder}: {e}")
-
-    stamped: List[Tuple[float, Path]] = []
-    for f in files:
-        try:
-            stamped.append((f.stat().st_mtime, f))
-        except OSError:
             continue
-    stamped.sort(key=lambda pair: pair[0], reverse=True)
+        for f in files:
+            try:
+                stamped.append((f.stat().st_mtime, f, boundary_real))
+            except OSError:
+                continue
+    stamped.sort(key=lambda item: item[0], reverse=True)
 
     out: Dict[str, Dict[str, Any]] = {}
-    for mtime, f in stamped:
-        try:
-            data = json.loads(f.read_text(encoding='utf-8', errors='replace'))
-        except (OSError, ValueError) as e:
-            logger.debug(f"Error reading Claude session file {f}: {e}")
-            continue
+    for mtime, f, boundary_real in stamped:
+        data = _read_bounded_json(f, boundary_real)
         if not isinstance(data, dict):
             continue
         for entry in (data.get("remoteMcpServersConfig") or []):
@@ -2901,9 +2907,10 @@ def extract_claudeai_mcp_servers(claude_dir: Path, projects: List[Dict]) -> None
 
 def claude_cli_and_desktop_share_account(home: Path) -> bool:
     """True only when CLI and desktop app under `home` have the same account id."""
-    cli_account = _read_json_dict(home / ".claude.json").get("oauthAccount")
+    cli_account = _read_json_dict(home / ".claude.json", home, _CLI_CONFIG_MAX_BYTES).get("oauthAccount")
     cli_account_uuid = cli_account.get("accountUuid") if isinstance(cli_account, dict) else None
-    desktop_account_uuid = _read_json_dict(_claude_app_support_dir(home) / "config.json").get("lastKnownAccountUuid")
+    desktop_config = _read_json_dict(_claude_app_support_dir(home) / "config.json", home, _SESSION_MAX_BYTES)
+    desktop_account_uuid = desktop_config.get("lastKnownAccountUuid")
     if not cli_account_uuid or not desktop_account_uuid:
         logger.debug(f"claude.ai connectors not mirrored for {home}: account id missing")
         return False
@@ -2916,12 +2923,13 @@ def claude_cli_and_desktop_share_account(home: Path) -> bool:
 _SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 _SESSION_MAX_BYTES = 5 * 1024 * 1024
 _SESSION_MAX_NAME_CHARS = 200
+_CLI_CONFIG_MAX_BYTES = 64 * 1024 * 1024
 # (lowercased name, lowercased host) of connectors the desktop app adds itself.
 _BUILTIN_REMOTE_CONNECTORS = (("visualize", "sandbox.claudemcpcontent.com"),)
 
 
-def _read_bounded_json(file: Path, boundary_real: Optional[str]) -> Any:
-    """Parse a regular file of at most 5 MB as JSON, else None; with a boundary it must live inside it."""
+def _read_bounded_json(file: Path, boundary_real: Optional[str], max_bytes: int = _SESSION_MAX_BYTES) -> Any:
+    """Parse a regular file of at most `max_bytes` as JSON, else None; with a boundary it must live inside it."""
     try:
         if boundary_real is None:
             fd = os.open(str(file), os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
@@ -2930,10 +2938,10 @@ def _read_bounded_json(file: Path, boundary_real: Optional[str]) -> Any:
             fd = open_contained(file, boundary_real)
         with os.fdopen(fd, "rb") as handle:
             status = os.fstat(handle.fileno())
-            if not stat.S_ISREG(status.st_mode) or status.st_size > _SESSION_MAX_BYTES:
+            if not stat.S_ISREG(status.st_mode) or status.st_size > max_bytes:
                 return None
-            raw = handle.read(_SESSION_MAX_BYTES + 1)
-        if len(raw) > _SESSION_MAX_BYTES:
+            raw = handle.read(max_bytes + 1)
+        if len(raw) > max_bytes:
             return None
         return json.loads(raw.decode("utf-8", errors="replace"))
     except (OSError, ValueError, RecursionError) as e:

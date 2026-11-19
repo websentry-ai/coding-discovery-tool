@@ -2,6 +2,7 @@
 
 import base64
 import hashlib
+import json
 import os
 import tempfile
 import time
@@ -112,6 +113,30 @@ class TestFolderContents(SkillFolderTestCase):
     def test_invalid_utf8_text_is_replaced_not_dropped(self):
         self.write("latin.txt", b"caf\xe9\n")
         self.assertEqual(self.collect()[0]["content"], "caf�\n")
+
+
+class TestNames(SkillFolderTestCase):
+    def test_a_name_that_isnt_utf8_is_sent_with_replacements_and_never_read(self):
+        # Linux keeps any bytes in a name (Latin-1 "café.sh" arrives as "caf\udce9.sh"); the backend can't encode those.
+        self.write("run.sh", "echo\n")
+        real_read_dir, read = sf._read_dir, []
+
+        def with_odd_names(path, root, deadline, room):
+            entries, cut = real_read_dir(path, root, deadline, room)
+            if os.path.normpath(path) == os.path.normpath(str(root)):
+                entries = sorted(entries + [("caf\udce9.sh", "file", 7), ("d\udce9r", "dir", 0)])
+            return entries, cut
+        real_read_file = sf._read_file
+
+        def spy(root, item, *args, **kwargs):
+            read.append(item["path"])
+            return real_read_file(root, item, *args, **kwargs)
+        with patch.object(sf, "_read_dir", side_effect=with_odd_names), patch.object(sf, "_read_file", side_effect=spy):
+            files = self.collect()
+        self.assertEqual(self.by_path(files)["caf\ufffd.sh"], {"path": "caf\ufffd.sh", "size": 7, "truncated": True})
+        self.assertIn("d\ufffdr/" + sf.NOT_WALKED_NAME, self.by_path(files))
+        self.assertEqual(read, ["run.sh"])
+        json.dumps(files, ensure_ascii=False).encode("utf-8")  # what the backend does with every path
 
 
 class TestLimits(SkillFolderTestCase):
@@ -417,6 +442,40 @@ class TestContainment(SkillFolderTestCase):
                 patch.object(sf.Path, "home", return_value=self.home):
             files = sf.collect_skill_files(self.home / "df" / "skills" / "lint" / "SKILL.md")
         self.assertEqual([f["path"] for f in files], ["run.sh"])
+
+    def _swap_for_bobs_folder(self, skill_dir):
+        # Bob's files, laid out like the skill's, and the skill folder swapped for a link to them after the checks.
+        bob = Path(os.path.realpath(self._tmp.name)) / "nfs" / "bob" / "private"
+        bob.mkdir(parents=True)
+        (bob / "SKILL.md").write_text("bob")
+        (bob / "notes.txt").write_text("bob's private notes")
+        (bob / "bob-only.txt").write_text("bob's diary")
+        skill_dir.rename(skill_dir.with_name(skill_dir.name + ".orig"))
+        os.symlink(bob, skill_dir)
+
+    def test_a_skill_folder_swapped_for_a_link_after_its_checks_is_not_listed(self):
+        (self.skill / "notes.txt").write_text("alice's notes")
+        real_skill_root = sf._skill_root
+
+        def checked_then_swapped(skill_md):
+            root = real_skill_root(skill_md)
+            self._swap_for_bobs_folder(self.skill)
+            return root
+        with patch.object(sf, "_skill_root", side_effect=checked_then_swapped):
+            files = self.collect()
+        self.assertEqual(files, [{"path": sf.NOT_WALKED_NAME, "size": 0, "truncated": True}])
+
+    def test_a_skill_folder_swapped_for_a_link_before_its_reads_is_not_read(self):
+        (self.skill / "notes.txt").write_text("alice's notes")
+        real_list_files = sf._list_files
+
+        def listed_then_swapped(root, deadline, skill_md_name=sf.SKILL_FILE_NAME):
+            listed = real_list_files(root, deadline, skill_md_name)
+            self._swap_for_bobs_folder(self.skill)
+            return listed
+        with patch.object(sf, "_list_files", side_effect=listed_then_swapped):
+            files = self.collect()
+        self.assertEqual(files, [{"path": "notes.txt", "size": len("alice's notes"), "truncated": True}])
 
     def _linked_home_layout(self):
         # Fedora Silverblue / CoreOS style: /home is a link to /var/home, and pwd and $HOME name /home/alice.

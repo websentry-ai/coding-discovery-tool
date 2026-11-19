@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from .constants import is_symlink_or_junction
-from .rule_read_helpers import _open_checked
+from .rule_read_helpers import _dir_real_path, _fd_real_path, _open_checked
 
 logger = logging.getLogger(__name__)
 
@@ -162,9 +162,13 @@ def _crosses_home(found: Path, root: Path) -> bool:
 def _skill_root(skill_md: Path) -> Optional[Path]:
     """The real folder of a SKILL.md, or None when it is too broad to walk (a drive, or a user's home or above)."""
     try:
-        root = Path(os.path.realpath(str(skill_md.parent)))
+        # Pinned to the path the OS reports for an open handle on it; every later folder and file read must stay inside.
+        pinned = _dir_real_path(os.path.realpath(str(skill_md.parent)))
     except (OSError, ValueError):
         return None
+    if not pinned:
+        return None
+    root = Path(pinned)
     # A skill folder linked to a home would upload that home's files, so it is never walked.
     if root == Path(root.anchor) or len(root.parts) < 3 or _is_home_or_above(root) or not root.is_dir():
         return None
@@ -180,15 +184,70 @@ def _not_walked(rel_dir: str) -> Dict:
             "truncated": True}
 
 
-def _read_dir(path: str, deadline: float, room: int):
-    """A folder's entries sorted by name, and whether reading stopped early (entry cap, examined cap or time)."""
+def _inside_root(real: Optional[str], root: Path) -> bool:
+    """True when a path the OS reports for an open handle lies in the checked skill root."""
+    if not real:
+        return False
+    real_n, base_n = (os.path.normcase(os.path.normpath(p)) for p in (real, str(root)))
+    return real_n == base_n or real_n.startswith(base_n.rstrip(os.sep) + os.sep)
+
+
+def _sendable(name: str) -> str:
+    """The name as valid UTF-8: a lone surrogate (bytes the file system holds that aren't UTF-8) becomes U+FFFD."""
+    return "".join("\ufffd" if 0xD800 <= ord(c) <= 0xDFFF else c for c in name)
+
+
+def _posix_is_link(entry) -> bool:
+    """A POSIX entry is a link, or can't be told apart from one."""
+    try:
+        return entry.is_symlink()
+    except OSError:
+        return True
+
+
+def _entry_kind(entry, is_link: bool):
+    """(kind, size) of a folder entry, never following a link: link, dir, file or other."""
+    if is_link:
+        return "link", 0
+    try:
+        if entry.is_dir(follow_symlinks=False):
+            return "dir", 0
+        if entry.is_file(follow_symlinks=False):
+            return "file", entry.stat(follow_symlinks=False).st_size
+    except OSError:
+        pass
+    return "other", 0
+
+
+def _scan(scanner, deadline: float, room: int, is_link):
+    """Up to the caps, a folder's (name, kind, size) entries sorted by name, and whether reading stopped early."""
     batch = []
-    with os.scandir(path) as entries:
+    with scanner as entries:
         for n, entry in enumerate(entries):
             if n >= min(MAX_DIR_ENTRIES, room) or (n and n % _DEADLINE_CHECK_EVERY == 0 and time.monotonic() >= deadline):
-                return sorted(batch, key=lambda e: e.name), True
-            batch.append(entry)
-    return sorted(batch, key=lambda e: e.name), False
+                return sorted(batch), True
+            batch.append((entry.name,) + _entry_kind(entry, is_link(entry)))
+    return sorted(batch), False
+
+
+def _read_dir(path: str, root: Path, deadline: float, room: int):
+    """A folder's entries and whether reading stopped early; OSError when the folder isn't inside the checked root."""
+    if os.name == "nt":
+        # Windows can't list through a folder handle, so the folder's real path is checked before and after the listing.
+        if not _inside_root(_dir_real_path(path), root):
+            raise OSError(f"{path} is outside {root}")
+        listing = _scan(os.scandir(path), deadline, room, lambda e: is_symlink_or_junction(e.path))
+        if not _inside_root(_dir_real_path(path), root):
+            raise OSError(f"{path} is outside {root}")
+        return listing
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        # Listed through the handle actually opened, so a folder swapped for a link after the checks can't redirect it.
+        if not _inside_root(_fd_real_path(fd), root):
+            raise OSError(f"{path} is outside {root}")
+        return _scan(os.scandir(fd), deadline, room, _posix_is_link)
+    finally:
+        os.close(fd)
 
 
 def _list_files(root: Path, deadline: float, skill_md_name: str = SKILL_FILE_NAME) -> List[Dict]:
@@ -204,42 +263,41 @@ def _list_files(root: Path, deadline: float, skill_md_name: str = SKILL_FILE_NAM
         rel_dir, depth = stack.pop()
         try:
             # Read lazily and bounded: a folder with a million entries must not stall the scan or fill memory.
-            entries, cut = _read_dir(os.path.join(str(root), rel_dir), deadline, MAX_EXAMINED_ENTRIES - examined)
+            entries, cut = _read_dir(os.path.join(str(root), rel_dir), root, deadline, MAX_EXAMINED_ENTRIES - examined)
         except OSError:
             unwalked.append(rel_dir)
             continue
         examined += len(entries)
         if cut:
             unwalked.append(rel_dir)
-        for n, entry in enumerate(entries):
+        for n, (name, kind, size) in enumerate(entries):
             out_of_time = n % _DEADLINE_CHECK_EVERY == 0 and n and time.monotonic() >= deadline
             if len(listed) >= MAX_WALKED_FILES or out_of_time:
                 # Cut off inside this folder: what it has left goes unread.
-                if any(not is_symlink_or_junction(e.path) for e in entries[n:]):
+                if any(left != "link" for _, left, _ in entries[n:]):
                     unwalked.append(rel_dir)
                 break
-            if is_symlink_or_junction(entry.path):
+            if kind == "link":
                 continue
-            rel = posixpath.join(rel_dir, entry.name) if rel_dir else entry.name
-            try:
-                if entry.is_dir(follow_symlinks=False):
-                    if entry.name in SKIP_DIR_NAMES:
-                        continue
-                    if depth + 1 < MAX_FOLDER_DEPTH:
-                        stack.append((rel, depth + 1))
-                    else:
-                        unwalked.append(rel)
+            shown = _sendable(name)
+            rel = posixpath.join(rel_dir, shown) if rel_dir else shown
+            if kind == "dir":
+                if name in SKIP_DIR_NAMES:
                     continue
-                if not entry.is_file(follow_symlinks=False):
-                    continue
-                size = entry.stat(follow_symlinks=False).st_size
-            except OSError:
+                # A name that isn't UTF-8 can't be sent as is: the folder is named, with U+FFFD, and left unread.
+                if depth + 1 < MAX_FOLDER_DEPTH and shown == name:
+                    stack.append((rel, depth + 1))
+                else:
+                    unwalked.append(rel)
+                continue
+            if kind != "file":
                 continue
             # SKILL.md itself is already sent as the skill's content.
             # Only the skill's own document is sent separately; a second skill.md beside it is a file like any other.
-            if (not rel_dir and entry.name == skill_md_name) or entry.name.lower() in _SKIP_FILE_NAMES:
+            if (not rel_dir and name == skill_md_name) or name.lower() in _SKIP_FILE_NAMES:
                 continue
-            listed.append({"path": rel, "size": size})
+            # Listed by its U+FFFD name and never read when the real name isn't UTF-8, so the backend sees it as unread.
+            listed.append({"path": rel, "size": size, **({} if shown == name else {"truncated": True})})
     # Named, not dropped: without these the list would look like the whole folder.
     return listed + [_not_walked(rel_dir) for rel_dir in sorted(set(unwalked))[:MAX_NOT_WALKED_LISTED]]
 
@@ -251,6 +309,11 @@ def _read_file(root: Path, item: Dict, text_room: int, send_head: bool = True) -
         item["truncated"] = True
         return
     fd, _ = opened
+    if not _inside_root(_fd_real_path(fd), root):
+        # The file actually opened left the checked root (a folder above it swapped for a link): not this skill's.
+        os.close(fd)
+        item["truncated"] = True
+        return
     keep = max(_SNIFF_BYTES, text_room * 4)  # a character is at most 4 bytes in UTF-8
     digest, kept, read = hashlib.sha256(), bytearray(), 0
     try:
@@ -295,8 +358,8 @@ def collect_skill_files(skill_md: Path) -> Optional[List[Dict]]:
         files = sorted(_list_files(root, deadline, skill_md.name), key=lambda f: (file_priority(f["path"]), f["path"]))
         text_budget, with_text, heads = MAX_TOTAL_CONTENT_CHARS, 0, 0
         for item in files:
-            if posixpath.basename(item["path"]) == NOT_WALKED_NAME and item.get("truncated"):
-                continue  # a folder left unread, not a file to open
+            if item.get("truncated"):
+                continue  # listed only: a folder left unread, or a name that isn't UTF-8
             if time.monotonic() >= deadline or item["size"] > MAX_HASHED_FILE_BYTES:
                 # Listed by name only, out of time or too big to read: the backend scores it as unread content.
                 item["truncated"] = True

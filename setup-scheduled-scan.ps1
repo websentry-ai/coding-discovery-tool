@@ -349,12 +349,14 @@ function Install-ScheduledTask {
                     -AllowStartIfOnBatteries `
                     -DontStopIfGoingOnBatteries `
                     -MultipleInstances IgnoreNew
-    # LogonType=Interactive is intentional: this tool targets personal developer
-    # laptops, so running only when the user is logged in is correct and avoids
-    # the need to store a plaintext password (required for S4U/Password types).
-    # Headless/server deployments are out of scope; use a service account with
-    # LogonType=Password and Register-ScheduledTask -Password if ever needed.
-    $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
+    # Run as the BUILTIN\Users group (SID S-1-5-32-545), not a fixed -UserId: the
+    # task fires in the session of whoever is logged in at run time, so whoami /
+    # system_user is the real end-user. Pinning -UserId $env:USERNAME baked in the
+    # *installer's* account, so a device set up by an IT technician reported that
+    # technician on every scan forever. A group principal still runs only when a
+    # member is logged in (no stored password / S4U), keeping the interactive
+    # intent. SID, not "Users", so it is locale-independent.
+    $principal = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Limited
 
     Register-ScheduledTask `
         -TaskName  $TaskName `

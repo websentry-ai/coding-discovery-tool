@@ -14,6 +14,7 @@ from ...mcp_extraction_helpers import (
     walk_for_claude_project_mcp_configs,
     extract_managed_mcp_config,
     extract_claude_plugin_mcp_configs_with_root_support,
+    claude_cli_and_desktop_share_account,
     extract_claudeai_mcp_servers_with_root_support,
     read_claude_code_config,
     is_claude_plugins_path,
@@ -74,7 +75,12 @@ class WindowsClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
         extract_claude_plugin_mcp_configs_with_root_support(all_projects, plugin_lookup=plugin_lookup)
 
         # Extract cloud-synced MCP server names from claude.ai
-        extract_claudeai_mcp_servers_with_root_support(all_projects)
+        extract_claudeai_mcp_servers_with_root_support(
+            all_projects,
+            home_filter=claude_cli_and_desktop_share_account,
+            include_desktop_sessions=True,
+            keep_cli_names=True,
+        )
 
         if not all_projects:
             return None

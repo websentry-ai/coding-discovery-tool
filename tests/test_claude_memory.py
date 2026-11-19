@@ -754,6 +754,21 @@ class TestMemoryDiscovery(_MemoryHome):
         self.assertEqual([item["file_name"] for item in second["flagged"]], ["db.md", "small.md"])
         self.assertEqual((first["flagged"], first["counts"]["url_only_not_sent"]), ([], 1))
 
+    def test_a_url_only_file_that_gains_a_credential_before_it_is_sent_goes_with_its_finding(self):
+        links = _memory_dir(self.home) / "links.md"
+        _write(links, "see https://a.example.com\n")
+        build_payload = cmh._folder_payload
+
+        def edited_meanwhile(scan, content_budget):
+            _write(links, "see https://a.example.com\nurl: " + FAKE_SECRET + "\n")
+            return build_payload(scan, content_budget)
+
+        with patch.object(cmh, "_folder_payload", side_effect=edited_meanwhile):
+            folder = self.collect()["folders"][0]
+
+        self.assertEqual([(item["file_name"], bool(item["findings"])) for item in folder["flagged"]],
+                         [("links.md", True)])
+
     def test_url_only_files_over_the_folder_cap_do_not_use_up_what_later_folders_may_hold(self):
         link_text = "see https://a.example.com\n"
         for slug, name in (("-a", "one.md"), ("-a", "two.md"), ("-b", "three.md")):

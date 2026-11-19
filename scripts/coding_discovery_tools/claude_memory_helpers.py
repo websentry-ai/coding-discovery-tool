@@ -355,7 +355,7 @@ def _scan_folder(folder: Dict, cached_entries: Dict, deadline: float,
 
 
 def _url_only_fitting(scan: Dict, content_budget: List[int]) -> List[Tuple[Path, Dict]]:
-    """The folder's URL-only files that fit what is left of the budget, read again now that they are needed."""
+    """The folder's URL-only files that fit what is left of the budget, read again as they are now."""
     index_path, fitting = scan["index_path"], []
     slots = MAX_FLAGGED_FILES_PER_FOLDER - len(_other_files(scan["sent"], index_path))
     for path, cost in scan["url_only"]:
@@ -363,7 +363,7 @@ def _url_only_fitting(scan: Dict, content_budget: List[int]) -> List[Tuple[Path,
             continue
         checked = _check_file(path, scan["folder"]["path"], scan["entries"].get(str(path)))
         item = checked and checked[1]
-        if item and not item["findings"] and _fits_budget(item, content_budget):
+        if item and _fits_budget(item, content_budget):
             fitting.append((path, item))
             slots -= path != index_path
     return fitting

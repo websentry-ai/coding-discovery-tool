@@ -176,10 +176,10 @@ class _MemoryHome(unittest.TestCase):
         self.addCleanup(sentry_patcher.stop)
         self.cache_file = self.state_dir / cmh.MEMORY_CACHE_FILENAME
 
-    def collect(self, home_user="alice", url_scan=False):
-        return cmh.collect_claude_memories(self.home, home_user, url_scan)
+    def collect(self, home_user="alice"):
+        return cmh.collect_claude_memories(self.home, home_user)
 
-    def collect_recording_reads(self, url_scan=False):
+    def collect_recording_reads(self):
         """(memories, names of the files whose content was read)."""
         read_names = []
         real_read = cmh.read_rule_file_contained
@@ -189,7 +189,7 @@ class _MemoryHome(unittest.TestCase):
             return real_read(path, *args, **kwargs)
 
         with patch.object(cmh, "read_rule_file_contained", side_effect=_recording_read):
-            return self.collect(url_scan=url_scan), read_names
+            return self.collect(), read_names
 
 
 class TestMemoryDiscovery(_MemoryHome):
@@ -498,7 +498,7 @@ class TestMemoryDiscovery(_MemoryHome):
         _write(memory / "b-links.md", "see https://a.example.com\n")
 
         with patch.object(cmh, "MAX_MEMORY_CONTENT_BYTES", _sent_cost("url: " + FAKE_SECRET + "\n") + 5):
-            folder = self.collect(url_scan=True)["folders"][0]
+            folder = self.collect()["folders"][0]
 
         self.assertEqual(folder["counts"]["url_only_not_sent"], 1)
         self.assertNotIn("not_sent", folder["counts"])
@@ -684,27 +684,22 @@ class TestMemoryDiscovery(_MemoryHome):
         self.assertIsNone(folder["index"])
         self.assertEqual(folder["counts"], {"total": 1, "flagged": 0, "clean": 1, "truncated": 0})
 
-    def test_a_url_only_file_is_sent_only_when_url_scanning_is_on(self):
+    def test_a_file_that_only_holds_urls_is_sent_with_its_hosts_and_no_findings(self):
         memory = _memory_dir(self.home)
         _write(memory / "MEMORY.md", "see https://wiki.example.com/start\n")
         _write(memory / "links.md", "post to https://hooks.example.org/x\n")
 
-        off = self.collect()["folders"][0]
-        on = self.collect(url_scan=True)["folders"][0]
+        folder = self.collect()["folders"][0]
 
-        self.assertIsNone(off["index"])
-        self.assertEqual(off["flagged"], [])
-        self.assertEqual(off["counts"], {"total": 2, "flagged": 0, "clean": 2, "truncated": 0})
-        self.assertEqual(on["index"]["url_hosts"], ["wiki.example.com"])
-        self.assertEqual(on["index"]["findings"], [])
-        self.assertEqual(on["flagged"][0]["url_hosts"], ["hooks.example.org"])
-        self.assertEqual(on["flagged"][0]["findings"], [])
-        self.assertEqual(on["counts"], {"total": 2, "flagged": 0, "clean": 2, "truncated": 0, "url_only": 2})
+        self.assertEqual((folder["index"]["url_hosts"], folder["index"]["findings"]), (["wiki.example.com"], []))
+        self.assertEqual((folder["flagged"][0]["url_hosts"], folder["flagged"][0]["findings"]),
+                         (["hooks.example.org"], []))
+        self.assertEqual(folder["counts"], {"total": 2, "flagged": 0, "clean": 2, "truncated": 0, "url_only": 2})
 
     def test_a_file_with_findings_and_urls_counts_as_flagged_not_url_only(self):
         _write(_memory_dir(self.home) / "db.md", "https://api.example.com " + FAKE_SECRET + "\n")
 
-        folder = self.collect(url_scan=True)["folders"][0]
+        folder = self.collect()["folders"][0]
 
         self.assertEqual(folder["counts"], {"total": 1, "flagged": 1, "clean": 0, "truncated": 0})
         self.assertEqual(folder["flagged"][0]["url_hosts"], ["api.example.com"])
@@ -717,7 +712,7 @@ class TestMemoryDiscovery(_MemoryHome):
 
         budget = _sent_cost(secret_text) + 5
         with patch.object(cmh, "MAX_MEMORY_CONTENT_BYTES", budget):
-            folder = self.collect(url_scan=True)["folders"][0]
+            folder = self.collect()["folders"][0]
 
         self.assertEqual([item["file_name"] for item in folder["flagged"]], ["z-db.md"])
         self.assertNotIn("not_sent", folder["counts"])
@@ -729,7 +724,7 @@ class TestMemoryDiscovery(_MemoryHome):
         _write(_memory_dir(self.home, "-b") / "db.md", secret_text)
 
         with patch.object(cmh, "MAX_MEMORY_CONTENT_BYTES", _sent_cost(secret_text) + 5):
-            first, second = self.collect(url_scan=True)["folders"]
+            first, second = self.collect()["folders"]
 
         self.assertEqual(([item["file_name"] for item in second["flagged"]], first["flagged"]), (["db.md"], []))
         self.assertEqual((first["counts"]["url_only_not_sent"], second["counts"].get("not_sent")), (1, None))
@@ -741,7 +736,7 @@ class TestMemoryDiscovery(_MemoryHome):
 
         with patch.object(cmh, "MAX_MEMORY_CONTENT_BYTES", _sent_cost(link_text) + 5), \
                 patch.object(cmh, "_folder_payload", wraps=cmh._folder_payload) as payload:
-            folders = self.collect(url_scan=True)["folders"]
+            folders = self.collect()["folders"]
 
         kept = [waiting for call in payload.call_args_list for waiting in call.args[0]["url_only"]]
         self.assertEqual([cost for _, cost in kept], [_sent_cost(link_text)] * 3)
@@ -754,7 +749,7 @@ class TestMemoryDiscovery(_MemoryHome):
         _write(_memory_dir(self.home, "-b") / "small.md", small_text)
 
         with patch.object(cmh, "MAX_MEMORY_CONTENT_BYTES", _sent_cost(secret_text) + _sent_cost(small_text) + 5):
-            first, second = self.collect(url_scan=True)["folders"]
+            first, second = self.collect()["folders"]
 
         self.assertEqual([item["file_name"] for item in second["flagged"]], ["db.md", "small.md"])
         self.assertEqual((first["flagged"], first["counts"]["url_only_not_sent"]), ([], 1))
@@ -766,15 +761,10 @@ class TestMemoryDiscovery(_MemoryHome):
 
         with patch.object(cmh, "MAX_FLAGGED_FILES_PER_FOLDER", 1), \
                 patch.object(cmh, "MAX_MEMORY_CONTENT_BYTES", 2 * _sent_cost(link_text) + 5):
-            folders = self.collect(url_scan=True)["folders"]
+            folders = self.collect()["folders"]
 
         self.assertEqual([len(folder["flagged"]) for folder in folders], [1, 1])
         self.assertEqual([folder["counts"].get("url_only_not_sent", 0) for folder in folders], [1, 0])
-
-    def test_url_scanning_changes_the_block_hash(self):
-        _write(_memory_dir(self.home) / "links.md", "see https://a.example.com\n")
-
-        self.assertNotEqual(self.collect()["hash"], self.collect(url_scan=True)["hash"])
 
 
 class TestMemoryCache(_MemoryHome):
@@ -785,7 +775,7 @@ class TestMemoryCache(_MemoryHome):
         super().setUp()
         self.memory = _memory_dir(self.home)
         _write(self.memory / "MEMORY.md", "index\n")
-        _write(self.memory / "clean.md", "nothing here, see https://wiki.example.com\n")
+        _write(self.memory / "clean.md", "nothing here\n")
         _write(self.memory / "db.md", "url: " + FAKE_SECRET + "\n")
 
     def test_an_unchanged_clean_file_is_not_read_again(self):
@@ -796,7 +786,6 @@ class TestMemoryCache(_MemoryHome):
         self.assertNotIn("clean.md", warm_reads)
         self.assertEqual(warm, cold)
         self.assertIn(FAKE_SECRET, warm["folders"][0]["flagged"][0]["content"])
-        self.assertEqual(warm["folders"][0]["url_hosts"], ["wiki.example.com"])
 
     def test_the_cache_holds_hashes_and_rule_ids_keyed_by_home_user_never_content(self):
         self.collect()
@@ -821,17 +810,14 @@ class TestMemoryCache(_MemoryHome):
         self.assertIn("MEMORY.md", cold_reads)
         self.assertNotIn("MEMORY.md", warm_reads)
 
-    def test_an_unchanged_file_with_urls_is_read_again_only_when_url_scanning_is_on(self):
+    def test_an_unchanged_file_with_urls_is_read_again_so_it_can_be_sent(self):
+        _write(self.memory / "links.md", "see https://wiki.example.com\n")
         self.collect()
 
-        _, off_reads = self.collect_recording_reads()
-        on, on_reads = self.collect_recording_reads(url_scan=True)
-        _, off_again = self.collect_recording_reads()
+        again, reads = self.collect_recording_reads()
 
-        self.assertNotIn("clean.md", off_reads)
-        self.assertIn("clean.md", on_reads)
-        self.assertIn("clean.md", [item["file_name"] for item in on["folders"][0]["flagged"]])
-        self.assertNotIn("clean.md", off_again)
+        self.assertIn("links.md", reads)
+        self.assertIn("links.md", [item["file_name"] for item in again["folders"][0]["flagged"]])
 
     def test_a_cached_finding_without_the_span_fields_is_rescanned(self):
         db_file = self.memory / "db.md"
@@ -1156,16 +1142,12 @@ class TestMemoriesOnTheToolReport(_DrivesMain, unittest.TestCase):
         self.assertEqual(reports[0]["payload_hash"], compute_payload_hash(without_memories))
         self.assertEqual(reports[0]["memories_hash"], tool["memories"]["hash"])
 
-    def test_url_only_files_ride_along_only_when_the_answer_enables_url_scanning(self):
+    def test_url_only_files_ride_along_with_the_flagged_ones(self):
         _write(self.memory / "links.md", "post to https://hooks.example.org/x\n")
-        enabled = '{"ok": true, "memory_scan_enabled": true, "memory_url_scan_enabled": true}'
 
-        plain = self.run_scan(self.ENABLED)[0]["tools"][0]["memories"]["folders"][0]
-        adm.discovery_cache.forget_tool_hash("Claude Code", "alice")
-        with_urls = self.run_scan(enabled)[0]["tools"][0]["memories"]["folders"][0]
+        folder = self.run_scan(self.ENABLED)[0]["tools"][0]["memories"]["folders"][0]
 
-        self.assertEqual([item["file_name"] for item in plain["flagged"]], ["db.md"])
-        self.assertEqual({item["file_name"] for item in with_urls["flagged"]}, {"db.md", "links.md"})
+        self.assertEqual({item["file_name"] for item in folder["flagged"]}, {"db.md", "links.md"})
 
     def test_the_s3_notify_body_carries_memories_hash(self):
         self.run_scan(self.ENABLED, s3=True)
@@ -1238,15 +1220,6 @@ class TestMemoriesOnTheToolReport(_DrivesMain, unittest.TestCase):
 
 class TestMemorySecretRules(unittest.TestCase):
     """The secret rules, line by line, and the findings (rule, line, match span, value span) they produce."""
-
-    def test_url_scan_flag_is_true_only_for_exactly_true(self):
-        cases = (
-            ('{"memory_url_scan_enabled": true}', True), ('{"memory_url_scan_enabled": false}', False),
-            ('{"memory_url_scan_enabled": "true"}', False), ('{"memory_url_scan_enabled": 1}', False),
-            ('{"memory_scan_enabled": true}', False), ("not json", False), ("[true]", False))
-        for body, expected in cases:
-            self.assertIs(cmh.memory_url_scan_enabled({"body": body}), expected, body)
-        self.assertFalse(cmh.memory_url_scan_enabled({}))
 
     def assert_spans(self, text, expected_value, rule_id, start=None, end=None):
         found = [f for f in memory_secret_rules.find_secrets(text) if f["rule_id"] == rule_id]

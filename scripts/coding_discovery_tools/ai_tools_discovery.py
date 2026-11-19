@@ -124,7 +124,7 @@ try:
     from .hooks_extractor import extract_hooks, hook_files_for, hooks_from_settings, root_owned
     from . import cache as discovery_cache
     from . import mcp_tools_cache
-    from .claude_memory_helpers import collect_claude_memories, memory_scan_enabled, memory_url_scan_enabled
+    from .claude_memory_helpers import collect_claude_memories, memory_scan_enabled
     from .mcp_extraction_helpers import (
         claude_cli_and_desktop_share_account,
         extract_claudeai_mcp_servers_with_root_support,
@@ -213,8 +213,7 @@ except ImportError:
     from scripts.coding_discovery_tools.hooks_extractor import extract_hooks, hook_files_for, hooks_from_settings, root_owned
     from scripts.coding_discovery_tools import cache as discovery_cache
     from scripts.coding_discovery_tools import mcp_tools_cache
-    from scripts.coding_discovery_tools.claude_memory_helpers import (
-        collect_claude_memories, memory_scan_enabled, memory_url_scan_enabled)
+    from scripts.coding_discovery_tools.claude_memory_helpers import collect_claude_memories, memory_scan_enabled
     from scripts.coding_discovery_tools.mcp_extraction_helpers import (
         claude_cli_and_desktop_share_account,
         extract_claudeai_mcp_servers_with_root_support,
@@ -4390,7 +4389,6 @@ def main():
                 deadline=send_deadline, response=scan_start_response,
             )
         scan_memory = memory_scan_enabled(scan_start_response)
-        scan_memory_urls = memory_url_scan_enabled(scan_start_response)
         if success:
             logger.info("✓ Scan in_progress event sent successfully")
         else:
@@ -4601,7 +4599,7 @@ def main():
 
                         if scan_memory and tool_name.lower() == "claude code":
                             with time_step("scan_memory_files", "process"):
-                                memories = collect_claude_memories(user_home, user_name, scan_memory_urls)
+                                memories = collect_claude_memories(user_home, user_name)
                             if memories:
                                 tool_filtered["memories"] = memories
 

@@ -52,14 +52,6 @@ def memory_scan_enabled(scan_start_response: Dict) -> bool:
         return False
 
 
-def memory_url_scan_enabled(scan_start_response: Dict) -> bool:
-    """True only when the scan-start response body carries memory_url_scan_enabled: true."""
-    try:
-        return json.loads(scan_start_response.get("body") or "").get("memory_url_scan_enabled") is True
-    except Exception:
-        return False
-
-
 def url_hosts(content: str) -> List[str]:
     """Sorted unique hostnames of the http(s) URLs in content."""
     return sorted({host for host in map(_hostname, _URL.findall(content)) if host})[:MAX_URL_HOSTS_PER_FILE]
@@ -251,9 +243,9 @@ def _markdown_files(folder: Path, deadline: float) -> Iterator[Path]:
 _FINDING_INT_KEYS = ("line", "start", "end", "value_start", "value_end")
 
 
-def _sendable(entry: Dict, url_scan: bool) -> bool:
-    """True when a file is uploaded: it has findings, or URL scanning is on and it has URL hosts."""
-    return bool(entry["findings"] or (url_scan and entry["url_hosts"]))
+def _sendable(entry: Dict) -> bool:
+    """True when a file is uploaded: it has findings or URL hosts."""
+    return bool(entry["findings"] or entry["url_hosts"])
 
 
 def _cached_verdict(entry: object) -> Dict:
@@ -274,8 +266,7 @@ def _cached_verdict(entry: object) -> Dict:
     return entry if well_formed else {}
 
 
-def _check_file(path: Path, folder: Path, cached_entry: object,
-                url_scan: bool = False) -> Optional[Tuple[Dict, Optional[Dict]]]:
+def _check_file(path: Path, folder: Path, cached_entry: object) -> Optional[Tuple[Dict, Optional[Dict]]]:
     """(cache entry, payload item or None for an unsent file) for one memory file; None when unreadable."""
     try:
         file_stat = os.lstat(path)
@@ -285,7 +276,7 @@ def _check_file(path: Path, folder: Path, cached_entry: object,
         return None
     cached = _cached_verdict(cached_entry)
     unchanged = cached.get("size") == file_stat.st_size and cached.get("mtime") == file_stat.st_mtime_ns
-    if unchanged and not _sendable(cached, url_scan):
+    if unchanged and not _sendable(cached):
         return cached, None
     read = read_rule_file_contained(path, folder)
     if read is None:
@@ -301,7 +292,7 @@ def _check_file(path: Path, folder: Path, cached_entry: object,
     entry = {"size": file_stat.st_size, "mtime": file_stat.st_mtime_ns, "sha256": content_hash,
              "findings": verdict["findings"], "url_hosts": verdict["url_hosts"],
              **({"findings_truncated": True} if verdict.get("findings_truncated") else {})}
-    if not _sendable(entry, url_scan):
+    if not _sendable(entry):
         return entry, None
     item = {"file_path": str(path), "file_name": path.name, "content": content, "size": size,
             "last_modified": last_modified, "truncated": truncated, "content_sha256": content_hash,
@@ -340,13 +331,13 @@ def _other_files(pairs: List[Tuple[Path, Dict]], index_path: Path) -> List[Dict]
     return [item for path, item in pairs if path != index_path]
 
 
-def _scan_folder(folder: Dict, cached_entries: Dict, deadline: float, content_budget: List[int],
-                 url_scan: bool = False) -> Tuple[Optional[Dict], Dict]:
+def _scan_folder(folder: Dict, cached_entries: Dict, deadline: float,
+                 content_budget: List[int]) -> Tuple[Optional[Dict], Dict]:
     """(scan of a folder or None when it has no memory files, cache entries by file path)."""
     root = folder["path"]
     candidates = islice(_markdown_files(root, deadline), MAX_FILES_PER_MEMORY_FOLDER)
     attempted = [
-        (path, _check_file(path, root, cached_entries.get(str(path)), url_scan))
+        (path, _check_file(path, root, cached_entries.get(str(path))))
         for path in takewhile(lambda _: time.monotonic() < deadline, candidates)
     ]
     checked = [(path,) + result for path, result in attempted if result]
@@ -363,14 +354,14 @@ def _scan_folder(folder: Dict, cached_entries: Dict, deadline: float, content_bu
             "not_sent": len(with_findings) - len(sent)}, entries
 
 
-def _url_only_fitting(scan: Dict, content_budget: List[int], url_scan: bool) -> List[Tuple[Path, Dict]]:
+def _url_only_fitting(scan: Dict, content_budget: List[int]) -> List[Tuple[Path, Dict]]:
     """The folder's URL-only files that fit what is left of the budget, read again now that they are needed."""
     index_path, fitting = scan["index_path"], []
     slots = MAX_FLAGGED_FILES_PER_FOLDER - len(_other_files(scan["sent"], index_path))
     for path, cost in scan["url_only"]:
         if (path != index_path and slots <= 0) or cost > content_budget[0]:
             continue
-        checked = _check_file(path, scan["folder"]["path"], scan["entries"].get(str(path)), url_scan)
+        checked = _check_file(path, scan["folder"]["path"], scan["entries"].get(str(path)))
         item = checked and checked[1]
         if item and not item["findings"] and _fits_budget(item, content_budget):
             fitting.append((path, item))
@@ -378,15 +369,15 @@ def _url_only_fitting(scan: Dict, content_budget: List[int], url_scan: bool) -> 
     return fitting
 
 
-def _folder_payload(scan: Dict, content_budget: List[int], url_scan: bool) -> Dict:
+def _folder_payload(scan: Dict, content_budget: List[int]) -> Dict:
     """The payload entry of a scanned folder; its URL-only files take what is left of the budget."""
     index_path = scan["index_path"]
-    sent_urls = _url_only_fitting(scan, content_budget, url_scan)
+    sent_urls = _url_only_fitting(scan, content_budget)
     sent = scan["sent"] + sent_urls
     url_only_not_sent = len(scan["url_only"]) - len(sent_urls)
     entries = list(scan["entries"].values())
     flagged = [entry for entry in entries if entry["findings"]]
-    url_only = [entry for entry in entries if not entry["findings"] and _sendable(entry, url_scan)]
+    url_only = [entry for entry in entries if not entry["findings"] and entry["url_hosts"]]
     truncated = [entry for entry in entries if entry["size"] > MAX_CONFIG_FILE_SIZE]
     clean = [entry for entry in entries if not entry["findings"] and entry["size"] <= MAX_CONFIG_FILE_SIZE]
     return {
@@ -439,7 +430,7 @@ def _write_cache(users: Dict) -> None:
         logger.debug(f"memory-scan-cache write failed: {e}")
 
 
-def collect_claude_memories(home: Path, home_user: str, url_scan: bool = False) -> Optional[Dict]:
+def collect_claude_memories(home: Path, home_user: str) -> Optional[Dict]:
     """The memories block for one user's Claude Code report, or None when the scan failed or ran out of time."""
     try:
         deadline = time.monotonic() + MEMORY_SCAN_BUDGET_SECONDS
@@ -449,7 +440,7 @@ def collect_claude_memories(home: Path, home_user: str, url_scan: bool = False) 
         memory_folders, project_entries = _memory_folders(home, deadline, cached_entries)
         content_budget = [MAX_MEMORY_CONTENT_BYTES]
         scanned = [
-            _scan_folder(folder, cached_entries, deadline, content_budget, url_scan)
+            _scan_folder(folder, cached_entries, deadline, content_budget)
             for folder in takewhile(lambda _: time.monotonic() < deadline, memory_folders)
         ]
         entries = {**project_entries,
@@ -463,7 +454,7 @@ def collect_claude_memories(home: Path, home_user: str, url_scan: bool = False) 
         if not finished:
             logger.warning(f"Claude memory scan for {home_user} ran out of time; the next run resumes it")
             return None
-        folders = [_folder_payload(scan, content_budget, url_scan) for scan, _ in scanned if scan]
+        folders = [_folder_payload(scan, content_budget) for scan, _ in scanned if scan]
         return {"hash": _folders_hash(folders), "rules_version": RULES_VERSION, "folders": folders}
     except Exception as e:
         logger.warning(f"Claude memory discovery failed for {home_user}: {e}")

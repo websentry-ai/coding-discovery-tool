@@ -88,8 +88,8 @@ def _homes_parents() -> List[Path]:
 
 
 @functools.lru_cache(maxsize=1)
-def _machine_user_homes() -> frozenset:
-    """Every account's home on this machine (pwd, or Windows' profile list), so an admin scan guards each user's."""
+def _machine_user_home_names() -> frozenset:
+    """Every account's home as the system names it (pwd, or Windows' profile list), before any link is resolved."""
     homes = set()
     try:
         if os.name == "nt":
@@ -100,8 +100,20 @@ def _machine_user_homes() -> frozenset:
             homes.update(Path(entry.pw_dir) for entry in pwd.getpwall() if entry.pw_dir not in ("", "/"))
     except Exception as e:  # pylint: disable=broad-exception-caught
         logger.debug(f"Could not list user homes: {e}")
-    real = set()
+    names = set()
     for home in homes:
+        try:
+            names.add(Path(os.path.abspath(str(home))))
+        except (OSError, ValueError):
+            continue
+    return frozenset(h for h in names if h != Path(h.anchor))
+
+
+@functools.lru_cache(maxsize=1)
+def _machine_user_homes() -> frozenset:
+    """Every account's real home on this machine, so an admin scan guards each user's."""
+    real = set()
+    for home in _machine_user_home_names():
         try:
             real.add(Path(os.path.realpath(str(home))))
         except (OSError, ValueError):
@@ -131,13 +143,14 @@ def _home_of(path: Path, homes) -> Optional[Path]:
 
 def _crosses_home(found: Path, root: Path) -> bool:
     """True when a link anywhere on the path moved the folder into a different account's home than it was found in."""
-    homes = set(_machine_user_homes())
+    homes, names = set(_machine_user_homes()), set(_machine_user_home_names())
     try:
+        names.add(Path(os.path.abspath(str(Path.home()))))
         homes.add(Path(os.path.realpath(str(Path.home()))))
     except (OSError, RuntimeError, ValueError):
         pass
-    # The found path is resolved by its own home's real name, so /var vs /private/var style aliases still match.
-    found_home = _home_of(Path(os.path.abspath(str(found))), {Path(os.path.abspath(str(h))) for h in homes} | homes)
+    # The found path is matched by every name a home goes by, so /home/alice linked to /var/home/alice still matches.
+    found_home = _home_of(Path(os.path.abspath(str(found))), names | homes)
     real_home = _home_of(root, homes)
     if real_home is None:
         return False

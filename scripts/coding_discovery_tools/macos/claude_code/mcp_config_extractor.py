@@ -2,7 +2,6 @@
 MCP config extraction for Claude Code on macOS systems.
 """
 
-import json
 import logging
 from pathlib import Path
 from typing import Optional, Dict, List
@@ -19,7 +18,9 @@ from ...mcp_extraction_helpers import (
     walk_for_claude_project_mcp_configs,
     extract_managed_mcp_config,
     extract_claude_plugin_mcp_configs_with_root_support,
+    claude_cli_and_desktop_share_account,
     extract_claudeai_mcp_servers_with_root_support,
+    read_claude_code_config,
     is_claude_plugins_path,
 )
 
@@ -80,7 +81,12 @@ class MacOSClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
         extract_claude_plugin_mcp_configs_with_root_support(all_projects, plugin_lookup=plugin_lookup)
 
         # Extract cloud-synced MCP server names from claude.ai
-        extract_claudeai_mcp_servers_with_root_support(all_projects)
+        extract_claudeai_mcp_servers_with_root_support(
+            all_projects,
+            home_filter=claude_cli_and_desktop_share_account,
+            include_desktop_sessions=True,
+            keep_cli_names=True,
+        )
 
         # Return None if no configs found
         if not all_projects:
@@ -137,16 +143,9 @@ class MacOSClaudeMCPConfigExtractor(BaseMCPConfigExtractor):
             List of project dicts or empty list if extraction fails
         """
         try:
-            # Check if file exists first to avoid unnecessary warnings
-            if not config_path.exists():
-                return []
-            content = config_path.read_text(encoding='utf-8', errors='replace')
-            
-            # Parse JSON
-            try:
-                config_data = json.loads(content)
-            except json.JSONDecodeError as e:
-                logger.warning(f"Invalid JSON in MCP config {config_path}: {e}")
+            # A regular file only: a pipe planted here would block the scan.
+            config_data = read_claude_code_config(config_path)
+            if config_data is None:
                 return []
             
             # Extract only MCP-related configuration

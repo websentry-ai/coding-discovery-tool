@@ -28,9 +28,6 @@ EMPTY_BLOCK_HASH = hashlib.sha256(
 ).hexdigest()
 SLUG = "-work-shop"
 
-# Must equal the same constant in the other repo (coding-discovery-tool / ai-gateway-data).
-MEMORY_SECRET_RULES_SHA256 = "1a14c32a69d474739cc76dd3ba84494bc6fb48c17a5106209e50c4d942a2151c"
-
 PRIVATE_KEY_BLOCK = (
     "-----BEGIN RSA PRIVATE KEY-----\n" + "MIIEowIBAAKCAQEA1b2c3d4e5f6g7h8i9j0k1l2m3n4\n" * 3
     + "-----END RSA PRIVATE KEY-----"
@@ -145,6 +142,17 @@ def _memory_dir(home, slug=SLUG):
     return home / ".claude" / "projects" / slug / "memory"
 
 
+def _span(text, part):
+    """(start, end) of the first occurrence of part in text."""
+    start = text.index(part)
+    return start, start + len(part)
+
+
+def _sent_cost(text):
+    """The budget cost of sending text as a file: its content, findings and URL hosts, JSON-escaped."""
+    return sum(len(json.dumps(part)) for part in (text, cmh.find_secrets(text), cmh.url_hosts(text)))
+
+
 def _folder(memories, path):
     return next(folder for folder in memories["folders"] if folder["path"] == str(path))
 
@@ -204,17 +212,19 @@ class TestMemoryDiscovery(_MemoryHome):
             {"path": str(memory), "project_path": "/work/shop", "memory_type": "auto", "scope": "user"},
         )
         self.assertNotIn("agent_name", folder)
-        self.assertEqual(folder["index"]["file_name"], "MEMORY.md")
-        self.assertEqual(folder["index"]["content"], "# Index\n- [db](db.md)\n")
-        self.assertNotIn("findings", folder["index"])
+        self.assertIsNone(folder["index"])
         self.assertEqual(folder["counts"], {"total": 4, "flagged": 1, "clean": 3, "truncated": 0})
         self.assertEqual(len(folder["flagged"]), 1)
         flagged = folder["flagged"][0]
         self.assertEqual(flagged["file_path"], str(memory / "db.md"))
-        self.assertEqual(flagged["findings"], [{"rule_id": "SECRET-002", "line": 3}])
-        self.assertIn(FAKE_SECRET, flagged["content"])
+        start, end = _span(flagged["content"], FAKE_SECRET)
+        self.assertEqual(flagged["findings"], [
+            {"rule_id": "SECRET-002", "line": 3, "start": start, "end": end, "value_start": start, "value_end": end}])
+        self.assertEqual(flagged["content_sha256"], hashlib.sha256(flagged["content"].encode()).hexdigest())
+        self.assertEqual(flagged["url_hosts"], [])
         self.assertEqual(
-            set(flagged), {"file_path", "file_name", "content", "size", "last_modified", "truncated", "findings"})
+            set(flagged), {"file_path", "file_name", "content", "size", "last_modified", "truncated", "findings",
+                           "content_sha256", "url_hosts"})
         self.assertNotIn("Prefer small diffs", json.dumps(memories))
 
     def test_a_secret_in_the_index_stays_in_index_with_its_findings(self):
@@ -223,7 +233,9 @@ class TestMemoryDiscovery(_MemoryHome):
 
         folder = self.collect()["folders"][0]
 
-        self.assertEqual(folder["index"]["findings"], [{"rule_id": "SECRET-002", "line": 1}])
+        self.assertEqual(folder["index"]["findings"], [
+            {"rule_id": "SECRET-002", "line": 1, "start": 6, "end": 6 + len(FAKE_SECRET),
+             "value_start": 6, "value_end": 6 + len(FAKE_SECRET)}])
         self.assertEqual(folder["flagged"], [])
         self.assertEqual(folder["counts"], {"total": 1, "flagged": 1, "clean": 0, "truncated": 0})
         self.assertIsNone(folder["project_path"])
@@ -234,7 +246,7 @@ class TestMemoryDiscovery(_MemoryHome):
 
         folder = self.collect()["folders"][0]
 
-        self.assertEqual(folder["flagged"][0]["findings"], [{"rule_id": "SECRET-002", "line": 1}])
+        self.assertEqual([(f["rule_id"], f["line"]) for f in folder["flagged"][0]["findings"]], [("SECRET-002", 1)])
 
     def test_unquoted_assignments_urls_and_query_strings_are_flagged(self):
         memory = _memory_dir(self.home)
@@ -280,13 +292,15 @@ class TestMemoryDiscovery(_MemoryHome):
 
         self.assertEqual(folder["counts"], {"total": 1, "flagged": 0, "clean": 1, "truncated": 0})
 
-    def test_two_matches_of_one_rule_on_one_line_are_one_finding(self):
+    def test_two_matches_of_one_rule_on_one_line_are_two_findings(self):
         memory = _memory_dir(self.home)
         _write(memory / "db.md", "primary " + FAKE_SECRET + " replica " + FAKE_SECRET + "\n")
 
         folder = self.collect()["folders"][0]
 
-        self.assertEqual(folder["flagged"][0]["findings"], [{"rule_id": "SECRET-002", "line": 1}])
+        findings = folder["flagged"][0]["findings"]
+        self.assertEqual([(f["rule_id"], f["line"]) for f in findings], [("SECRET-002", 1)] * 2)
+        self.assertLess(findings[0]["end"], findings[1]["start"])
 
     @unittest.skipUnless(os.name == "posix", "needs POSIX symlinks")
     def test_symlinks_and_non_markdown_files_are_skipped(self):
@@ -323,7 +337,7 @@ class TestMemoryDiscovery(_MemoryHome):
 
     def test_at_most_300_files_per_folder_and_the_index_survives_the_cap(self):
         memory = _memory_dir(self.home)
-        _write(memory / "MEMORY.md", "index\n")
+        _write(memory / "MEMORY.md", "index " + FAKE_SECRET + "\n")
         for number in range(305):
             _write(memory / f"A{number:03d}.md", "topic\n")
 
@@ -413,38 +427,40 @@ class TestMemoryDiscovery(_MemoryHome):
 
     def test_flagged_files_beyond_the_per_folder_cap_are_counted_not_sent(self):
         memory = _memory_dir(self.home)
-        _write(memory / "MEMORY.md", "index\n")
+        _write(memory / "MEMORY.md", "index " + FAKE_SECRET + "\n")
         for number in range(4):
             _write(memory / f"db{number}.md", "url: " + FAKE_SECRET + "\n")
 
         with patch.object(cmh, "MAX_FLAGGED_FILES_PER_FOLDER", 2):
             folder = self.collect()["folders"][0]
 
-        self.assertEqual(folder["index"]["content"], "index\n")
+        self.assertEqual(folder["index"]["file_name"], "MEMORY.md")
         self.assertEqual([item["file_name"] for item in folder["flagged"]], ["db0.md", "db1.md"])
         self.assertEqual(
-            folder["counts"], {"total": 5, "flagged": 4, "clean": 1, "truncated": 0, "not_sent": 2})
+            folder["counts"], {"total": 5, "flagged": 5, "clean": 0, "truncated": 0, "not_sent": 2})
 
     def test_the_content_budget_keeps_the_index_first_and_counts_what_does_not_fit(self):
         memory = _memory_dir(self.home)
         flagged_text = "url: " + FAKE_SECRET + "\n"
-        _write(memory / "MEMORY.md", "index\n")
+        index_text = "index " + FAKE_SECRET + "\n"
+        _write(memory / "MEMORY.md", index_text)
         _write(memory / "db0.md", flagged_text)
         _write(memory / "db1.md", flagged_text)
 
-        budget = len(json.dumps("index\n")) + len(json.dumps(flagged_text)) + 5
+        budget = _sent_cost(index_text) + _sent_cost(flagged_text) + 5
         with patch.object(cmh, "MAX_MEMORY_CONTENT_BYTES", budget):
             folder = self.collect()["folders"][0]
 
-        self.assertEqual(folder["index"]["content"], "index\n")
+        self.assertEqual(folder["index"]["content"], index_text)
         self.assertEqual([item["file_name"] for item in folder["flagged"]], ["db0.md"])
         self.assertEqual(folder["counts"]["not_sent"], 1)
 
     def test_the_content_budget_is_shared_across_folders(self):
+        index_text = "index " + FAKE_SECRET + "\n"
         for slug in ("-a", "-b"):
-            _write(_memory_dir(self.home, slug) / "MEMORY.md", "index\n")
+            _write(_memory_dir(self.home, slug) / "MEMORY.md", index_text)
 
-        with patch.object(cmh, "MAX_MEMORY_CONTENT_BYTES", len(json.dumps("index\n")) + 1):
+        with patch.object(cmh, "MAX_MEMORY_CONTENT_BYTES", _sent_cost(index_text) + 1):
             folders = self.collect()["folders"]
 
         self.assertEqual([bool(folder["index"]) for folder in folders], [True, False])
@@ -453,14 +469,51 @@ class TestMemoryDiscovery(_MemoryHome):
     def test_the_content_budget_measures_the_json_escaped_size_that_is_sent(self):
         memory = _memory_dir(self.home)
         escaped_text = "url: " + FAKE_SECRET + "\x01" * 20 + "\n"
-        _write(memory / "MEMORY.md", "index\n")
+        index_text = "index " + FAKE_SECRET + "\n"
+        _write(memory / "MEMORY.md", index_text)
         _write(memory / "db.md", escaped_text)
 
-        with patch.object(cmh, "MAX_MEMORY_CONTENT_BYTES", len(json.dumps("index\n")) + len(escaped_text) + 5):
+        raw_cost = _sent_cost(escaped_text) - len(json.dumps(escaped_text)) + len(escaped_text)
+        with patch.object(cmh, "MAX_MEMORY_CONTENT_BYTES", _sent_cost(index_text) + raw_cost + 5):
             folder = self.collect()["folders"][0]
 
         self.assertEqual(folder["flagged"], [])
         self.assertEqual(folder["counts"]["not_sent"], 1)
+
+    def test_many_small_heavily_flagged_files_stay_within_the_content_budget(self):
+        memory = _memory_dir(self.home)
+        for number in range(50):
+            _write(memory / f"f{number:02d}.md", (FAKE_SECRET + " ") * 500)
+
+        folder = self.collect()["folders"][0]
+
+        sent = folder["flagged"]
+        self.assertTrue(0 < len(sent) < 50)
+        self.assertEqual(folder["counts"]["not_sent"], 50 - len(sent))
+        self.assertLessEqual(len(json.dumps(sent)), cmh.MAX_MEMORY_CONTENT_BYTES + 300 * len(sent))
+
+    def test_unsent_url_only_files_are_counted_apart_from_not_sent(self):
+        memory = _memory_dir(self.home)
+        _write(memory / "a-db.md", "url: " + FAKE_SECRET + "\n")
+        _write(memory / "b-links.md", "see https://a.example.com\n")
+
+        with patch.object(cmh, "MAX_MEMORY_CONTENT_BYTES", _sent_cost("url: " + FAKE_SECRET + "\n") + 5):
+            folder = self.collect()["folders"][0]
+
+        self.assertEqual(folder["counts"]["url_only_not_sent"], 1)
+        self.assertNotIn("not_sent", folder["counts"])
+
+    def test_findings_in_a_crlf_file_slice_to_the_secret(self):
+        memory = _memory_dir(self.home)
+        _write(memory / "db.md", "intro\r\nurl: " + FAKE_SECRET + "\r\nDB_PASSWORD=Sup3rS3cret9\r\nend\r\n")
+
+        flagged = self.collect()["folders"][0]["flagged"][0]
+
+        self.assertEqual([f["line"] for f in flagged["findings"]], [2, 3])
+        self.assertEqual(
+            [flagged["content"][f["value_start"]:f["value_end"]] for f in flagged["findings"]],
+            [FAKE_SECRET, "Sup3rS3cret9"])
+        self.assertEqual(flagged["content"][flagged["findings"][0]["start"]:flagged["findings"][0]["end"]], FAKE_SECRET)
 
     def test_url_hosts_are_capped_per_file_and_per_folder(self):
         memory = _memory_dir(self.home)
@@ -483,13 +536,15 @@ class TestMemoryDiscovery(_MemoryHome):
 
     def test_an_index_over_the_size_cap_is_sent_truncated(self):
         memory = _memory_dir(self.home)
-        _write(memory / "MEMORY.md", "x" * (MAX_CONFIG_FILE_SIZE + 500))
+        text = FAKE_SECRET + "\n" + "x" * (MAX_CONFIG_FILE_SIZE + 500)
+        _write(memory / "MEMORY.md", text)
 
         index = self.collect()["folders"][0]["index"]
 
         self.assertTrue(index["truncated"])
         self.assertEqual(len(index["content"]), MAX_CONFIG_FILE_SIZE)
-        self.assertEqual(index["size"], MAX_CONFIG_FILE_SIZE + 500)
+        self.assertEqual(index["size"], len(text))
+        self.assertEqual(index["content_sha256"], hashlib.sha256(index["content"].encode()).hexdigest())
 
     def test_a_topic_file_over_the_size_cap_is_counted_truncated_not_clean(self):
         memory = _memory_dir(self.home)
@@ -531,13 +586,13 @@ class TestMemoryDiscovery(_MemoryHome):
 
     def test_a_relocated_auto_memory_directory_is_scanned(self):
         relocated = self.home / "notes" / "claude-memory"
-        _write(relocated / "MEMORY.md", "moved\n")
+        _write(relocated / "MEMORY.md", "moved " + FAKE_SECRET + "\n")
         _write(self.home / ".claude" / "settings.json", json.dumps({"autoMemoryDirectory": "~/notes/claude-memory"}))
 
         folder = _folder(self.collect(), relocated)
 
         self.assertEqual((folder["memory_type"], folder["scope"], folder["project_path"]), ("auto", "user", None))
-        self.assertEqual(folder["index"]["content"], "moved\n")
+        self.assertEqual(folder["index"]["content"], "moved " + FAKE_SECRET + "\n")
 
     def test_a_relocated_directory_that_is_the_home_or_above_it_is_refused(self):
         _write(self.home / "README.md", FAKE_SECRET)
@@ -552,11 +607,11 @@ class TestMemoryDiscovery(_MemoryHome):
             self.collect(), {"hash": EMPTY_BLOCK_HASH, "rules_version": cmh.RULES_VERSION, "folders": []})
 
     def test_the_hash_ignores_last_modified_and_follows_content(self):
-        index = _write(_memory_dir(self.home) / "MEMORY.md", "index\n")
+        index = _write(_memory_dir(self.home) / "MEMORY.md", "index " + FAKE_SECRET + "\n")
         first = self.collect()
         os.utime(index, (1_700_000_000, 1_700_000_000))
         touched = self.collect()
-        _write(index, "index, edited\n")
+        _write(index, "index, edited " + FAKE_SECRET + "\n")
         edited = self.collect()
 
         self.assertNotEqual(
@@ -585,6 +640,147 @@ class TestMemoryDiscovery(_MemoryHome):
 
         self.assertEqual(folder["url_hosts"], ["api.example.com", "docs.example.com", "grafana.internal.io"])
 
+    def test_findings_carry_one_entry_per_match_with_the_secret_value_span(self):
+        memory = _memory_dir(self.home)
+        _write(memory / "db.md", "DB_PASSWORD=Sup3rS3cret9 and " + FAKE_SECRET + " and DB_PASSWORD=Sup3rS3cret9\n")
+
+        flagged = self.collect()["folders"][0]["flagged"][0]
+
+        found = flagged["findings"]
+        self.assertEqual([f["rule_id"] for f in found], ["SECRET-021", "SECRET-002", "SECRET-021"])
+        self.assertEqual([f["start"] for f in found], sorted(f["start"] for f in found))
+        self.assertEqual(
+            [flagged["content"][f["value_start"]:f["value_end"]] for f in found],
+            ["Sup3rS3cret9", FAKE_SECRET, "Sup3rS3cret9"])
+        self.assertNotIn("findings_truncated", flagged)
+
+    def test_findings_beyond_the_cap_are_cut_and_flagged_as_truncated(self):
+        memory = _memory_dir(self.home)
+        _write(memory / "db.md", "".join(f"line {number} {FAKE_SECRET}\n" for number in range(3)))
+
+        with patch.object(cmh, "MAX_FINDINGS_PER_FILE", 2):
+            cold = self.collect()["folders"][0]["flagged"][0]
+            warm = self.collect()["folders"][0]["flagged"][0]
+
+        self.assertEqual(len(cold["findings"]), 2)
+        self.assertIs(cold["findings_truncated"], True)
+        self.assertEqual(warm, cold)
+
+    def test_findings_at_the_cap_are_not_flagged_as_truncated(self):
+        memory = _memory_dir(self.home)
+        _write(memory / "db.md", "".join(f"line {number} {FAKE_SECRET}\n" for number in range(2)))
+
+        with patch.object(cmh, "MAX_FINDINGS_PER_FILE", 2):
+            flagged = self.collect()["folders"][0]["flagged"][0]
+
+        self.assertEqual(len(flagged["findings"]), 2)
+        self.assertNotIn("findings_truncated", flagged)
+
+    def test_an_index_without_findings_is_not_sent_but_counted(self):
+        _write(_memory_dir(self.home) / "MEMORY.md", "# Index only\n")
+
+        folder = self.collect()["folders"][0]
+
+        self.assertIsNone(folder["index"])
+        self.assertEqual(folder["counts"], {"total": 1, "flagged": 0, "clean": 1, "truncated": 0})
+
+    def test_a_file_that_only_holds_urls_is_sent_with_its_hosts_and_no_findings(self):
+        memory = _memory_dir(self.home)
+        _write(memory / "MEMORY.md", "see https://wiki.example.com/start\n")
+        _write(memory / "links.md", "post to https://hooks.example.org/x\n")
+
+        folder = self.collect()["folders"][0]
+
+        self.assertEqual((folder["index"]["url_hosts"], folder["index"]["findings"]), (["wiki.example.com"], []))
+        self.assertEqual((folder["flagged"][0]["url_hosts"], folder["flagged"][0]["findings"]),
+                         (["hooks.example.org"], []))
+        self.assertEqual(folder["counts"], {"total": 2, "flagged": 0, "clean": 2, "truncated": 0, "url_only": 2})
+
+    def test_a_file_with_findings_and_urls_counts_as_flagged_not_url_only(self):
+        _write(_memory_dir(self.home) / "db.md", "https://api.example.com " + FAKE_SECRET + "\n")
+
+        folder = self.collect()["folders"][0]
+
+        self.assertEqual(folder["counts"], {"total": 1, "flagged": 1, "clean": 0, "truncated": 0})
+        self.assertEqual(folder["flagged"][0]["url_hosts"], ["api.example.com"])
+
+    def test_files_with_findings_are_sent_before_url_only_files_under_the_budget(self):
+        memory = _memory_dir(self.home)
+        secret_text = "url: " + FAKE_SECRET + "\n"
+        _write(memory / "a-links.md", "see https://a.example.com\n")
+        _write(memory / "z-db.md", secret_text)
+
+        budget = _sent_cost(secret_text) + 5
+        with patch.object(cmh, "MAX_MEMORY_CONTENT_BYTES", budget):
+            folder = self.collect()["folders"][0]
+
+        self.assertEqual([item["file_name"] for item in folder["flagged"]], ["z-db.md"])
+        self.assertNotIn("not_sent", folder["counts"])
+        self.assertEqual(folder["counts"]["url_only_not_sent"], 1)
+
+    def test_findings_in_a_later_folder_are_sent_before_url_only_files_of_an_earlier_folder(self):
+        secret_text = "url: " + FAKE_SECRET + "\n"
+        _write(_memory_dir(self.home, "-a") / "links.md", "see https://a.example.com\n")
+        _write(_memory_dir(self.home, "-b") / "db.md", secret_text)
+
+        with patch.object(cmh, "MAX_MEMORY_CONTENT_BYTES", _sent_cost(secret_text) + 5):
+            first, second = self.collect()["folders"]
+
+        self.assertEqual(([item["file_name"] for item in second["flagged"]], first["flagged"]), (["db.md"], []))
+        self.assertEqual((first["counts"]["url_only_not_sent"], second["counts"].get("not_sent")), (1, None))
+
+    def test_url_only_files_keep_no_content_in_memory_while_folders_are_scanned(self):
+        link_text = "see https://a.example.com\n"
+        for slug in ("-a", "-b", "-c"):
+            _write(_memory_dir(self.home, slug) / "links.md", link_text)
+
+        with patch.object(cmh, "MAX_MEMORY_CONTENT_BYTES", _sent_cost(link_text) + 5), \
+                patch.object(cmh, "_folder_payload", wraps=cmh._folder_payload) as payload:
+            folders = self.collect()["folders"]
+
+        kept = [waiting for call in payload.call_args_list for waiting in call.args[0]["url_only"]]
+        self.assertEqual([cost for _, cost in kept], [_sent_cost(link_text)] * 3)
+        self.assertEqual([folder["counts"].get("url_only_not_sent", 0) for folder in folders], [0, 1, 1])
+
+    def test_a_small_url_only_file_is_sent_when_an_earlier_larger_one_no_longer_fits(self):
+        secret_text, small_text = "url: " + FAKE_SECRET + "\n", "see https://b.example.com\n"
+        _write(_memory_dir(self.home, "-a") / "big.md", "see https://a.example.com\n" + "x" * 400)
+        _write(_memory_dir(self.home, "-b") / "db.md", secret_text)
+        _write(_memory_dir(self.home, "-b") / "small.md", small_text)
+
+        with patch.object(cmh, "MAX_MEMORY_CONTENT_BYTES", _sent_cost(secret_text) + _sent_cost(small_text) + 5):
+            first, second = self.collect()["folders"]
+
+        self.assertEqual([item["file_name"] for item in second["flagged"]], ["db.md", "small.md"])
+        self.assertEqual((first["flagged"], first["counts"]["url_only_not_sent"]), ([], 1))
+
+    def test_a_url_only_file_that_gains_a_credential_before_it_is_sent_goes_with_its_finding(self):
+        links = _memory_dir(self.home) / "links.md"
+        _write(links, "see https://a.example.com\n")
+        build_payload = cmh._folder_payload
+
+        def edited_meanwhile(scan, content_budget):
+            _write(links, "see https://a.example.com\nurl: " + FAKE_SECRET + "\n")
+            return build_payload(scan, content_budget)
+
+        with patch.object(cmh, "_folder_payload", side_effect=edited_meanwhile):
+            folder = self.collect()["folders"][0]
+
+        self.assertEqual([(item["file_name"], bool(item["findings"])) for item in folder["flagged"]],
+                         [("links.md", True)])
+
+    def test_url_only_files_over_the_folder_cap_do_not_use_up_what_later_folders_may_hold(self):
+        link_text = "see https://a.example.com\n"
+        for slug, name in (("-a", "one.md"), ("-a", "two.md"), ("-b", "three.md")):
+            _write(_memory_dir(self.home, slug) / name, link_text)
+
+        with patch.object(cmh, "MAX_FLAGGED_FILES_PER_FOLDER", 1), \
+                patch.object(cmh, "MAX_MEMORY_CONTENT_BYTES", 2 * _sent_cost(link_text) + 5):
+            folders = self.collect()["folders"]
+
+        self.assertEqual([len(folder["flagged"]) for folder in folders], [1, 1])
+        self.assertEqual([folder["counts"].get("url_only_not_sent", 0) for folder in folders], [1, 0])
+
 
 class TestMemoryCache(_MemoryHome):
 
@@ -594,7 +790,7 @@ class TestMemoryCache(_MemoryHome):
         super().setUp()
         self.memory = _memory_dir(self.home)
         _write(self.memory / "MEMORY.md", "index\n")
-        _write(self.memory / "clean.md", "nothing here, see https://wiki.example.com\n")
+        _write(self.memory / "clean.md", "nothing here\n")
         _write(self.memory / "db.md", "url: " + FAKE_SECRET + "\n")
 
     def test_an_unchanged_clean_file_is_not_read_again(self):
@@ -605,7 +801,6 @@ class TestMemoryCache(_MemoryHome):
         self.assertNotIn("clean.md", warm_reads)
         self.assertEqual(warm, cold)
         self.assertIn(FAKE_SECRET, warm["folders"][0]["flagged"][0]["content"])
-        self.assertEqual(warm["folders"][0]["url_hosts"], ["wiki.example.com"])
 
     def test_the_cache_holds_hashes_and_rule_ids_keyed_by_home_user_never_content(self):
         self.collect()
@@ -613,7 +808,8 @@ class TestMemoryCache(_MemoryHome):
         cache_text = self.cache_file.read_text(encoding="utf-8")
         entry = json.loads(cache_text)["users"]["alice"][str(self.memory / "db.md")]
         self.assertEqual(set(entry), {"size", "mtime", "sha256", "findings", "url_hosts"})
-        self.assertEqual(entry["findings"], [{"rule_id": "SECRET-002", "line": 1}])
+        self.assertEqual([(f["rule_id"], f["line"]) for f in entry["findings"]], [("SECRET-002", 1)])
+        self.assertEqual(set(entry["findings"][0]), {"rule_id", "line", "start", "end", "value_start", "value_end"})
         self.assertNotIn("Hunter2pass", cache_text)
         self.assertEqual(list(self.home.rglob(cmh.MEMORY_CACHE_FILENAME)), [])
         if os.name == "posix":
@@ -621,6 +817,34 @@ class TestMemoryCache(_MemoryHome):
 
         self.collect(home_user="bob")
         self.assertEqual(set(json.loads(self.cache_file.read_text())["users"]), {"alice", "bob"})
+
+    def test_an_unchanged_index_without_findings_is_not_read_again(self):
+        _, cold_reads = self.collect_recording_reads()
+        _, warm_reads = self.collect_recording_reads()
+
+        self.assertIn("MEMORY.md", cold_reads)
+        self.assertNotIn("MEMORY.md", warm_reads)
+
+    def test_an_unchanged_file_with_urls_is_read_again_so_it_can_be_sent(self):
+        _write(self.memory / "links.md", "see https://wiki.example.com\n")
+        self.collect()
+
+        again, reads = self.collect_recording_reads()
+
+        self.assertIn("links.md", reads)
+        self.assertIn("links.md", [item["file_name"] for item in again["folders"][0]["flagged"]])
+
+    def test_a_cached_finding_without_the_span_fields_is_rescanned(self):
+        db_file = self.memory / "db.md"
+        self.collect()
+        users = json.loads(self.cache_file.read_text())
+        entry = users["users"]["alice"][str(db_file)]
+        entry["findings"] = [{"rule_id": "SECRET-002", "line": 1}]
+        self.cache_file.write_text(json.dumps(users))
+
+        flagged = self.collect()["folders"][0]["flagged"][0]
+
+        self.assertEqual(set(flagged["findings"][0]), {"rule_id", "line", "start", "end", "value_start", "value_end"})
 
     def test_a_changed_file_is_rescanned(self):
         self.assertEqual(self.collect()["folders"][0]["counts"]["flagged"], 1)
@@ -669,6 +893,9 @@ class TestMemoryCache(_MemoryHome):
                 **matching, "sha256": "0", "findings": [7], "url_hosts": [3]}}}}),
             json.dumps({"rules_version": cmh.RULES_VERSION, "users": {"alice": {entry_path: {
                 **matching, "sha256": "0", "findings": {}, "url_hosts": "wiki"}}}}),
+            json.dumps({"rules_version": cmh.RULES_VERSION, "users": {"alice": {entry_path: {
+                **matching, "sha256": "0", "url_hosts": [], "findings": [
+                    {"rule_id": "SECRET-002", "line": 1, "start": 9, "end": 5, "value_start": 2, "value_end": 3}]}}}}),
         )
         for corrupt in corrupt_caches:
             self.cache_file.write_text(corrupt)
@@ -886,7 +1113,7 @@ class TestMemoriesOnTheToolReport(_DrivesMain, unittest.TestCase):
         super().setUp()
         self.home = Path(self._dir).resolve()
         self.memory = _memory_dir(self.home)
-        _write(self.memory / "MEMORY.md", "index\n")
+        _write(self.memory / "MEMORY.md", "index " + FAKE_SECRET + "\n")
         _write(self.memory / "db.md", "url: " + FAKE_SECRET + "\n")
 
     def run_scan(self, reply, extra_patches=(), extra_args=(), fresh_report=_report, **backend_options):
@@ -924,11 +1151,18 @@ class TestMemoriesOnTheToolReport(_DrivesMain, unittest.TestCase):
         tool = reports[0]["tools"][0]
         self.assertEqual(tool["name"], "Claude Code")
         folder = tool["memories"]["folders"][0]
-        self.assertEqual(folder["index"]["content"], "index\n")
-        self.assertEqual(folder["flagged"][0]["findings"], [{"rule_id": "SECRET-002", "line": 1}])
+        self.assertEqual(folder["index"]["content"], "index " + FAKE_SECRET + "\n")
+        self.assertEqual([(f["rule_id"], f["line"]) for f in folder["flagged"][0]["findings"]], [("SECRET-002", 1)])
         without_memories = {key: value for key, value in tool.items() if key != "memories"}
         self.assertEqual(reports[0]["payload_hash"], compute_payload_hash(without_memories))
         self.assertEqual(reports[0]["memories_hash"], tool["memories"]["hash"])
+
+    def test_url_only_files_ride_along_with_the_flagged_ones(self):
+        _write(self.memory / "links.md", "post to https://hooks.example.org/x\n")
+
+        folder = self.run_scan(self.ENABLED)[0]["tools"][0]["memories"]["folders"][0]
+
+        self.assertEqual({item["file_name"] for item in folder["flagged"]}, {"db.md", "links.md"})
 
     def test_the_s3_notify_body_carries_memories_hash(self):
         self.run_scan(self.ENABLED, s3=True)
@@ -948,7 +1182,7 @@ class TestMemoriesOnTheToolReport(_DrivesMain, unittest.TestCase):
     def test_a_memory_only_change_uploads_again_under_the_same_tool_hash(self):
         first = self.run_scan(self.ENABLED)
         unchanged = self.run_scan(self.ENABLED)
-        _write(self.memory / "MEMORY.md", "index, edited\n")
+        _write(self.memory / "MEMORY.md", "index, edited " + FAKE_SECRET + "\n")
         edited = self.run_scan(self.ENABLED)
 
         self.assertEqual((len(first), len(unchanged), len(edited)), (1, 0, 1))
@@ -1000,12 +1234,92 @@ class TestMemoriesOnTheToolReport(_DrivesMain, unittest.TestCase):
 
 
 class TestMemorySecretRules(unittest.TestCase):
-    """The shared secret rules, line by line; ai-gateway-data keeps the same file and the same lines."""
+    """The secret rules, line by line, and the findings (rule, line, match span, value span) they produce."""
 
-    def test_the_rule_file_is_the_one_ai_gateway_data_holds(self):
-        rules_source = Path(memory_secret_rules.__file__).read_bytes().replace(b"\r\n", b"\n")
+    def assert_spans(self, text, expected_value, rule_id, start=None, end=None):
+        found = [f for f in memory_secret_rules.find_secrets(text) if f["rule_id"] == rule_id]
+        self.assertEqual(len(found), 1, (rule_id, found))
+        finding = found[0]
+        self.assertEqual(text[finding["value_start"]:finding["value_end"]], expected_value)
+        self.assertLessEqual(finding["start"], finding["value_start"])
+        self.assertLess(finding["value_start"], finding["value_end"])
+        self.assertLessEqual(finding["value_end"], finding["end"])
+        return finding
 
-        self.assertEqual(hashlib.sha256(rules_source).hexdigest(), MEMORY_SECRET_RULES_SHA256)
+    def test_vendor_rules_have_the_value_span_equal_to_the_match(self):
+        text = "token: " + FAKE_SECRET + "\n"
+        finding = self.assert_spans(text, FAKE_SECRET, "SECRET-002")
+        self.assertEqual((finding["start"], finding["end"], finding["line"]), (7, 7 + len(FAKE_SECRET), 1))
+        self.assertEqual((finding["value_start"], finding["value_end"]), (finding["start"], finding["end"]))
+
+    def test_key_value_rules_have_the_value_span_on_the_secret_only(self):
+        for text, value, rule_id in (
+                ("DB_PASSWORD=Sup3rS3cret9", "Sup3rS3cret9", "SECRET-021"),
+                ('{"api_key": "a1b2c3d4e5f6g7h8i9j0"}', "a1b2c3d4e5f6g7h8i9j0", "SECRET-016"),
+                ('password = "Sup3rS3cret!"', "Sup3rS3cret!", "SECRET-016"),
+                ('"secret": "q8Zr2LmP0xVb7NcT"', "q8Zr2LmP0xVb7NcT", "SECRET-016"),
+                ("azure_api_key=" + "0123456789abcdef" * 2, "0123456789abcdef" * 2, "SECRET-019")):
+            finding = self.assert_spans(text, value, rule_id)
+            self.assertGreater(finding["value_start"], finding["start"], text)
+
+    def test_url_credential_rules_have_the_value_span_on_the_password(self):
+        for text, value, rule_id in (
+                ("postgres://app:S3cretPass9@db.internal:5432/app", "S3cretPass9", "SECRET-011"),
+                ("redis://:R3disPass9word@cache.internal:6379/0", "R3disPass9word", "SECRET-022"),
+                ("https://deploy:hunter2pass9@git.example.com/repo.git", "hunter2pass9", "SECRET-022")):
+            finding = self.assert_spans(text, value, rule_id)
+            self.assertNotIn("app:", text[finding["value_start"]:finding["value_end"]])
+
+    def test_query_and_bearer_rules_have_the_value_span_on_the_token(self):
+        self.assert_spans("https://api.example.com/hook?token=tk_8Hq2Lz9Xv4Pw", "tk_8Hq2Lz9Xv4Pw", "SECRET-023")
+        self.assert_spans("https://x.example.com/d?a=1&key=6a41c739-57cf-46a9-b53d-cda412bb3d24",
+                          "6a41c739-57cf-46a9-b53d-cda412bb3d24", "SECRET-023")
+        self.assert_spans("Authorization: Bearer abc123def456ghi789jkl", "abc123def456ghi789jkl", "SECRET-024")
+
+    def test_quoted_and_query_rules_put_the_value_span_on_the_secret(self):
+        for text, value, rule_id in (
+                ('pwd: "abcd1234"', "abcd1234", "SECRET-016"),
+                ('api_key = "abcdefgh12345678"', "abcdefgh12345678", "SECRET-016"),
+                ('token: "abcdefgh12345678"', "abcdefgh12345678", "SECRET-016"),
+                ("https://x.example.com/p?token=abcd1234efgh", "abcd1234efgh", "SECRET-023"),
+                ("https://x.example.com/p?x=1&key=abcdefgh1234567890abcd", "abcdefgh1234567890abcd", "SECRET-023")):
+            self.assert_spans(text, value, rule_id)
+        self.assertEqual(memory_secret_rules.find_secrets('password = "short1"'), [])
+        self.assertEqual(memory_secret_rules.find_secrets('api_key = "abcdefgh1234567"'), [])
+
+    def test_a_multi_line_private_key_is_one_finding_covering_all_its_lines(self):
+        text = "before\n" + PRIVATE_KEY_BLOCK + "\nafter\n"
+
+        found = memory_secret_rules.find_secrets(text)
+
+        self.assertEqual(len(found), 1)
+        self.assertEqual(text[found[0]["start"]:found[0]["end"]], PRIVATE_KEY_BLOCK)
+        self.assertEqual((found[0]["value_start"], found[0]["value_end"]), (found[0]["start"], found[0]["end"]))
+        self.assertEqual(found[0]["line"], 2)
+
+    def test_two_matches_on_one_line_are_two_findings_sorted_by_start(self):
+        text = "a " + FAKE_SECRET + " b " + FAKE_SECRET
+
+        found = memory_secret_rules.find_secrets(text)
+
+        self.assertEqual([(f["start"], f["end"]) for f in found], [
+            (2, 2 + len(FAKE_SECRET)), (5 + len(FAKE_SECRET), 5 + 2 * len(FAKE_SECRET))])
+        self.assertEqual({f["line"] for f in found}, {1})
+
+    def test_offsets_are_str_indices_after_a_non_ascii_character(self):
+        text = "caf\u00e9 \U0001f511 " + FAKE_SECRET
+
+        found = memory_secret_rules.find_secrets(text)
+
+        self.assertEqual(text[found[0]["start"]:found[0]["end"]], FAKE_SECRET)
+        self.assertEqual(found[0]["start"], 7)
+        self.assertGreater(len(text.encode("utf-8")), len(text) + 3)
+
+    def test_every_masking_example_has_a_value_span_inside_its_match(self):
+        for label, line in SHOULD_MASK:
+            for finding in memory_secret_rules.find_secrets(line):
+                self.assertTrue(0 <= finding["start"] <= finding["value_start"] < finding["value_end"]
+                                <= finding["end"] <= len(line), label)
 
     def test_lines_with_a_secret_are_flagged(self):
         for label, line in SHOULD_MASK:

@@ -19,7 +19,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Callable, Tuple
 
@@ -3771,6 +3771,9 @@ class AIToolsDetector:
             "system_user": system_user or home_user,
             "device_id": device_id,
             "is_container": in_container(),
+            # Stamped at build time, not send time: a queued report can go out a
+            # day later and must still describe the state it was taken from.
+            "scanned_at": datetime.now(timezone.utc).isoformat(),
             "tools": [tool_for_report]
         }
 

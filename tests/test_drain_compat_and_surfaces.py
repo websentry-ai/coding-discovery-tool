@@ -39,7 +39,7 @@ REPORT_KEYS = {
     "device_id", "home_user", "system_user", "tools", "run_id", "app_name",
     "tool_name", "payload_hash", "scan_event", "scan_error", "manifest",
     "covered_home_users", "is_container", "sentry_metrics", "timestamp",
-    "device_discovery_id",
+    "device_discovery_id", "scanned_at", "memories_hash",
 }
 
 

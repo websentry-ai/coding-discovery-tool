@@ -211,22 +211,65 @@ class TestLimits(SkillFolderTestCase):
         too_deep = "/".join(f"d{n}" for n in range(sf.MAX_FOLDER_DEPTH))
         self.assertEqual([f["path"] for f in self.collect()], ["top.py", f"{too_deep}/{sf.NOT_WALKED_NAME}"])
 
-    def test_every_file_is_hashed_whole_however_much_the_folder_holds(self):
-        # No hashing budget: a script after a large file still gets its digest, so an edit to it is never missed.
-        big = self.skill / "assets" / "a.sh"
-        big.parent.mkdir()
-        with open(big, "wb") as handle:  # 300 MiB, past the 256 MiB folder budget the walk used to have; sparse
-            handle.seek(300 * 1024 * 1024 - 1)
+    def sparse(self, rel, size):
+        path = self.skill / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "wb") as handle:  # sparse where the filesystem allows, so a huge file costs no disk or time
+            handle.seek(size - 1)
             handle.write(b"\0")
+        return path
+
+    def test_a_file_after_an_oversized_one_is_still_hashed(self):
+        # No folder budget: a 300 MiB file is listed by size only, and the script after it still gets its digest.
+        self.sparse("assets/a.sh", 300 * 1024 * 1024)
         script = "#!/bin/sh\necho ok\n"
         self.write("zz/run.sh", script)
         files = self.by_path(self.collect())
-        digest = hashlib.sha256()
-        with open(big, "rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-        self.assertEqual(files["assets/a.sh"]["sha256"], digest.hexdigest())
+        self.assertEqual(files["assets/a.sh"], {"path": "assets/a.sh", "size": 300 * 1024 * 1024, "truncated": True})
         self.assertEqual(files["zz/run.sh"]["sha256"], hashlib.sha256(script.encode()).hexdigest())
+
+    def test_a_file_over_the_hashing_cap_is_never_opened(self):
+        # A multi-GB file in a skill folder must not be read from disk on every scan.
+        size = sf.MAX_HASHED_FILE_BYTES + 1
+        self.sparse("models/weights.bin", size)
+        self.write("run.sh", "echo ok\n")
+        opened, read = [], []
+        real_open, real_read = sf._open_checked, sf._read_file
+
+        def open_spy(path, *args, **kwargs):
+            opened.append(Path(path).name)
+            return real_open(path, *args, **kwargs)
+
+        def read_spy(root, item, *args, **kwargs):
+            read.append(item["path"])
+            return real_read(root, item, *args, **kwargs)
+
+        with patch.object(sf, "_open_checked", open_spy), patch.object(sf, "_read_file", read_spy):
+            files = self.by_path(self.collect())
+        self.assertEqual(files["models/weights.bin"], {"path": "models/weights.bin", "size": size, "truncated": True})
+        self.assertEqual(read, ["run.sh"])
+        self.assertEqual(opened, ["run.sh"])
+        self.assertIn("sha256", files["run.sh"])
+
+    def test_a_file_at_the_hashing_cap_is_still_hashed(self):
+        with patch.object(sf, "MAX_HASHED_FILE_BYTES", 4096):
+            at_cap = b"\x00" + b"a" * 4095
+            self.write("at.bin", at_cap)
+            self.write("over.bin", at_cap + b"a")
+            files = self.by_path(self.collect())
+        self.assertEqual(files["at.bin"]["sha256"], hashlib.sha256(at_cap).hexdigest())
+        self.assertTrue(files["at.bin"]["binary"])
+        self.assertNotIn("truncated", files["at.bin"])
+        self.assertEqual(files["over.bin"], {"path": "over.bin", "size": 4097, "truncated": True})
+
+    def test_a_file_that_grows_past_the_cap_after_listing_gets_no_digest(self):
+        # The size is checked when listed; a file swapped for a bigger one before it is read is still capped.
+        path = self.write("grow.sh", "echo ok\n")
+        item = {"path": "grow.sh", "size": 8}
+        path.write_bytes(b"x" * 5000)
+        with patch.object(sf, "MAX_HASHED_FILE_BYTES", 4096):
+            sf._read_file(self.skill, item, 100)
+        self.assertEqual(item, {"path": "grow.sh", "size": 8, "truncated": True})
 
     def test_only_the_skill_s_own_document_is_left_out(self):
         # On a case-sensitive filesystem a second skill.md beside SKILL.md is a file like any other.

@@ -33,8 +33,10 @@ NOT_WALKED_NAME = "(not walked)"
 MAX_NOT_WALKED_LISTED = 50
 BINARY_HEAD_BYTES = 512  # what the backend reads to tell an image from an executable
 _SNIFF_BYTES = 8192  # a NUL in the first bytes marks a file as binary
-# Every file is hashed whole (sha256 is always the real digest) up to this many bytes per folder; past it a file is
-# listed without one. Byte-based, so which files are hashed never depends on timing.
+# Files up to this size are read and hashed whole (sha256 is always the real digest); a bigger one is listed by path
+# and size only, never opened. The largest of 33,272 files in 7,263 real skills was 7.7 MiB, and GitHub refuses files
+# past 100 MiB, so a skill file above it is an anomaly. Size-based, so which files are hashed never depends on timing.
+MAX_HASHED_FILE_BYTES = 100 * 1024 * 1024
 MAX_BINARY_HEADS = 1000  # binaries sent with their first bytes; the backend keeps at most 1,000 files anyway
 MAX_DIR_ENTRIES = 10_000  # entries read from one folder; a bigger folder is marked as not walked
 MAX_EXAMINED_ENTRIES = 50_000  # entries looked at in the whole skill folder, files and folders alike
@@ -243,6 +245,9 @@ def _read_file(root: Path, item: Dict, text_room: int, send_head: bool = True) -
             # Read to the end every time: a file's digest is what makes any edit to it a new upload and a new version.
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 read += len(chunk)
+                if read > MAX_HASHED_FILE_BYTES:
+                    item["truncated"] = True  # grew past the cap after it was listed: sent like any oversized file
+                    return
                 digest.update(chunk)
                 kept += chunk[:keep - len(kept)]
         item["sha256"] = digest.hexdigest()
@@ -279,8 +284,8 @@ def collect_skill_files(skill_md: Path) -> Optional[List[Dict]]:
         for item in files:
             if posixpath.basename(item["path"]) == NOT_WALKED_NAME and item.get("truncated"):
                 continue  # a folder left unread, not a file to open
-            if time.monotonic() >= deadline:
-                # Listed by name only: the backend scores a folder it could not fully read with care.
+            if time.monotonic() >= deadline or item["size"] > MAX_HASHED_FILE_BYTES:
+                # Listed by name only, out of time or too big to read: the backend scores it as unread content.
                 item["truncated"] = True
                 continue
             room = min(MAX_FILE_CONTENT_CHARS, text_budget) if with_text < MAX_FILES_WITH_CONTENT else 0

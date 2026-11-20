@@ -36,8 +36,8 @@ class TestMacOSDeviceId(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 MacOSDeviceIdExtractor().extract_device_id()
 
-    def test_raises_on_placeholder_serial(self):
-        with patch(MAC_RUN, return_value=IOREG.format("Default string")):
+    def test_raises_when_serial_is_empty(self):
+        with patch(MAC_RUN, return_value=IOREG.format("")):
             with self.assertRaises(RuntimeError):
                 MacOSDeviceIdExtractor().extract_device_id()
 

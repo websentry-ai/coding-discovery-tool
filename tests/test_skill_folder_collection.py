@@ -206,14 +206,17 @@ class TestCredentialFiles(SkillFolderTestCase):
                      "auth.json", ".codex/auth.json", ".secrets.yaml", "terraform.tfvars", "prod.tfstate",
                      "terraform.tfvars.json", "terraform.tfstate.backup", "sample-app-firebase-adminsdk-x1.json",
                      "client_secret_example.json", "dist-app.env", "sample-app.env", "prod.auto.tfvars.json",
-                     "client_secret_123-dist.apps.googleusercontent.com.json"):
+                     "client_secret_123-dist.apps.googleusercontent.com.json", "token.txt", "access_token.json",
+                     "refresh-token", ".env-local", ".env_production", "prod.env.bak", "production.env.backup",
+                     "credentials.json.bak", "server.pem.old", ".env~", "service-account-key.json", "gcp-sa-key.json"):
             self.assertTrue(sf.is_credential_file(path), path)
         for path in (".env.example", "env.md", "environment.py", "envoy.yaml", "dotenv.py", "credentials.md",
                      "keys.py", "id_rsa.pub", "secret_sauce.py", "docs/secrets-management.md", "monkey.txt",
                      "accounts.example.json", "account.py", "client.json", "tokenizer.json", "config",
                      "app/config.json", "docker/config.json", "kube/config", "terraform.tfvars.example",
                      "auth.py", "authors.json", "env", "main.tf", "terraform.tfvars.json.example", "example.env",
-                     "config.template.env", "credentials.sample.json"):
+                     "config.template.env", "credentials.sample.json", "token_counter.py", "tokenize.ts",
+                     "environment.yml", "notes.bak", "README.md.orig", "sa.py", "keymap.json"):
             self.assertFalse(sf.is_credential_file(path), path)
 
     def test_a_private_key_is_withheld_even_when_its_name_looks_like_a_template(self):

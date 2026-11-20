@@ -66,6 +66,7 @@ _NEVER_TEMPLATE_NAMES = frozenset({
 _NEVER_TEMPLATE_SUFFIXES = (".tfstate", ".tfstate.backup")  # Terraform state holds resource secrets in plain text
 _NEVER_TEMPLATE_PREFIXES = ("client_secret",)  # Google OAuth: client_secret_<id>.apps.googleusercontent.com.json
 _NEVER_TEMPLATE_PARTS = ("firebase-adminsdk",)  # Firebase admin keys: <project>-firebase-adminsdk-<id>.json
+# Service-account keys are also matched by "service-account" anywhere in a .json name, or the words "sa" and "key".
 # Env and credential files: a template of one (.env.example, credentials.sample.json) has no real values and is sent.
 _CREDENTIAL_NAMES = frozenset({
     ".env", ".envrc", ".dev.vars", "credentials", "credentials.json", "credentials.yml", "credentials.yaml",
@@ -74,6 +75,10 @@ _CREDENTIAL_NAMES = frozenset({
     ".netrc", ".npmrc", ".pypirc", ".pgpass", ".git-credentials", ".htpasswd",
 })
 _CREDENTIAL_SUFFIXES = (".env", ".tfvars", ".tfvars.json")  # Terraform variables hold provider keys
+# A backup copy holds what the original holds: "credentials.json.bak" is checked as "credentials.json".
+_BACKUP_SUFFIXES = (".bak", ".backup", ".old", ".orig", ".save", "~")
+# Data files with "token" as a whole word in their name (token.txt, access_token.json); not code like token_counter.py.
+_TOKEN_DATA_EXTENSIONS = frozenset({"", ".json", ".txt", ".yaml", ".yml", ".toml"})
 # Credential files known by their folder as well as their name, matched on the path's last two parts.
 _CREDENTIAL_PATH_ENDS = frozenset({(".kube", "config"), (".docker", "config.json"), (".aws", "config")})
 # Data files in a secrets folder; its scripts and docs are still sent, so a payload can't hide there from the scan.
@@ -109,9 +114,14 @@ def file_priority(path: str) -> int:
     return 3
 
 
+def _name_parts(name: str) -> List[str]:
+    """The words of a file name, split on dots, dashes and underscores."""
+    return [p for p in name.replace("-", ".").replace("_", ".").split(".") if p]
+
+
 def _is_template_name(name: str) -> bool:
     """A template's usual name: the word last or just before the extension, or the first of two parts (example.env)."""
-    parts = [p for p in name.replace("-", ".").replace("_", ".").split(".") if p]
+    parts = _name_parts(name)
     if len(parts) < 2:
         return False
     return parts[-1] in _TEMPLATE_MARKERS or parts[-2] in _TEMPLATE_MARKERS or (
@@ -122,11 +132,17 @@ def is_credential_file(path: str) -> bool:
     """True for a file that holds the user's own credentials (.env, a private key, a token file), not a template."""
     parts = path.lower().split("/")
     name = parts[-1]
+    while name.endswith(_BACKUP_SUFFIXES) and len(name) > 1:
+        name = name[:-1] if name.endswith("~") else posixpath.splitext(name)[0]
     ext = posixpath.splitext(name)[1]
-    if (ext in _PRIVATE_KEY_EXTENSIONS or name in _PRIVATE_KEY_NAMES or tuple(parts[-2:]) in _CREDENTIAL_PATH_ENDS
+    words = _name_parts(name)
+    if (ext in _PRIVATE_KEY_EXTENSIONS or name in _PRIVATE_KEY_NAMES
+            or tuple(parts[-2:-1] + [name]) in _CREDENTIAL_PATH_ENDS
             or name.lstrip(".") in _NEVER_TEMPLATE_NAMES or name.endswith(_NEVER_TEMPLATE_SUFFIXES)
             or ext == ".json" and (name.startswith(_NEVER_TEMPLATE_PREFIXES)
-                                   or any(part in name for part in _NEVER_TEMPLATE_PARTS))):
+                                   or any(part in name for part in _NEVER_TEMPLATE_PARTS)
+                                   or "service-account" in name or "service_account" in name
+                                   or {"sa", "key"} <= set(words))):
         return True
     # A data file in a secrets folder is withheld whatever its name says. A plain .txt there is usually a key, so only
     # code and written docs in a secrets folder are sent.
@@ -136,8 +152,9 @@ def is_credential_file(path: str) -> bool:
     if _is_template_name(name):
         return False
     # A leading dot hides a file without changing what it holds: ".credentials.json" is Claude Code's token store.
-    return (name in _CREDENTIAL_NAMES or name.lstrip(".") in _CREDENTIAL_NAMES or name.startswith(".env.")
-            or name.endswith(_CREDENTIAL_SUFFIXES))
+    return (name in _CREDENTIAL_NAMES or name.lstrip(".") in _CREDENTIAL_NAMES or name.endswith(_CREDENTIAL_SUFFIXES)
+            or name.startswith((".env.", ".env-", ".env_"))
+            or ext in _TOKEN_DATA_EXTENSIONS and ("token" in words or "tokens" in words))
 
 
 def _homes_parents() -> List[Path]:

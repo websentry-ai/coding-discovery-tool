@@ -3,9 +3,10 @@ Device ID extraction for macOS
 """
 
 import logging
+
 from ..coding_tool_base import BaseDeviceIdExtractor
 from ..constants import COMMAND_TIMEOUT
-from ..utils import run_command, get_hostname
+from ..utils import is_valid_serial, run_command
 
 logger = logging.getLogger(__name__)
 
@@ -15,24 +16,15 @@ class MacOSDeviceIdExtractor(BaseDeviceIdExtractor):
 
     def extract_device_id(self) -> str:
         """
-        Extract macOS device serial number.
-        
-        Returns:
-            Serial number or hostname as fallback
-        """
-        try:
-            output = run_command(
-                ["system_profiler", "SPHardwareDataType"],
-                COMMAND_TIMEOUT
-            )
-            if output:
-                for line in output.split('\n'):
-                    if 'Serial Number' in line and ':' in line:
-                        parts = line.split(':', 1)
-                        if len(parts) == 2:
-                            return parts[1].strip()
-        except Exception as e:
-            logger.warning(f"Could not extract macOS serial number: {e}")
-        
-        return get_hostname()
+        Extract the hardware serial number via ioreg (locale-stable).
 
+        Raises:
+            RuntimeError: if the serial cannot be read or is a placeholder value
+        """
+        output = run_command(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"], COMMAND_TIMEOUT)
+        for line in (output or "").split("\n"):
+            if "IOPlatformSerialNumber" in line and "=" in line:
+                serial = line.split("=", 1)[1].strip().strip('"').strip()
+                if is_valid_serial(serial):
+                    return serial
+        raise RuntimeError("Could not read a valid hardware serial number on macOS (IOPlatformSerialNumber)")

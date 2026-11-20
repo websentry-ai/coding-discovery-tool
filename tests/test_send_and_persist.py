@@ -388,7 +388,7 @@ class TestScanEvents(unittest.TestCase):
 
         # Verify payload structure
         payload = json.loads(self.server.requests[0]["body"])
-        self.assertEqual(payload["device_id"], "DEVICE123")
+        self.assertEqual(payload["device_discovery_id"], "DEVICE123")
         self.assertEqual(payload["run_id"], "run-uuid-1234")
         self.assertEqual(payload["scan_event"], "in_progress")
         self.assertEqual(payload["app_name"], "JumpCloud")

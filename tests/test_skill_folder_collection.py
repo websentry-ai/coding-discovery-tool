@@ -212,7 +212,8 @@ class TestCredentialFiles(SkillFolderTestCase):
                      "credentials.production.json", "token.csv", "prod-secrets.ini", "api_key.txt",
                      "openai-api-key.txt", "apikey.json", "password.txt", "passwords.yaml",
                      ".envrc.local", ".dev.vars.production", ".aws/sso/cache/3f2a9c.json", ".ssh/known_hosts",
-                     ".config/gcloud/access_tokens.db", "server.der"):
+                     ".config/gcloud/access_tokens.db", "server.der", "token.dat", "credentials.sqlite",
+                     "secrets.bin"):
             self.assertTrue(sf.is_credential_file(path), path)
         for path in (".env.example", "env.md", "environment.py", "envoy.yaml", "dotenv.py", "credentials.md",
                      "keys.py", "id_rsa.pub", "secret_sauce.py", "docs/secrets-management.md", "monkey.txt",
@@ -232,9 +233,15 @@ class TestCredentialFiles(SkillFolderTestCase):
         ec = "-----BEGIN " + "EC PARAMETERS-----\nBggqhkjOPQMBBw==\n-----END EC PARAMETERS-----\n-----BEGIN " + "EC PRIVATE KEY-----"
         self.write("certs/signer", f"{ec}\n{self.SECRET}\n")
         self.write("certs/ca-bundle", "-----BEGIN " + "CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")
+        sa_key = json.dumps({"type": "service_account", "project_id": "my-proj",
+                             "private_key": "-----BEGIN " + f"PRIVATE KEY-----\n{self.SECRET}\n"})
+        self.write("my-proj-1a2b3c4d5e6f.json", sa_key)
+        # Code that quotes a key is still sent, so a script can't hide behind one.
+        self.write("scripts/sign.py", "KEY = " + repr(header + "\n..."))
         files = self.by_path(self.collect())
         self.assertIn("CERTIFICATE", files["certs/ca-bundle"]["content"])  # a public certificate is still sent
-        for rel in ("deploy_key", "keys/github_work", "certs/signer"):
+        self.assertIn("KEY =", files["scripts/sign.py"]["content"])
+        for rel in ("deploy_key", "keys/github_work", "certs/signer", "my-proj-1a2b3c4d5e6f.json"):
             self.assertEqual(files[rel], {"path": rel, "size": files[rel]["size"], "skipped": "secret_file"}, rel)
         self.assertIn("A key looks like this", files["tls-guide.md"]["content"])
         self.assertNotIn(self.SECRET, json.dumps(list(files.values())))

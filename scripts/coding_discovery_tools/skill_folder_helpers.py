@@ -78,14 +78,11 @@ _CREDENTIAL_NAMES = frozenset({
 _CREDENTIAL_SUFFIXES = (".env", ".tfvars", ".tfvars.json")  # Terraform variables hold provider keys
 # A backup copy holds what the original holds: "credentials.json.bak" is checked as "credentials.json".
 _BACKUP_SUFFIXES = (".bak", ".backup", ".old", ".orig", ".save", "~")
-# Data files with one of these as a whole word in their name (token.txt, credentials.production.json, secrets.csv).
-# Code and docs with the same words (token_counter.py, secrets-management.md) are still sent.
+# Files with one of these as a whole word in their name (token.txt, credentials.production.json, secrets.db), whatever
+# their extension. Code and written docs with the same words (token_counter.py, secrets-management.md) are still sent.
 _CREDENTIAL_WORDS = frozenset({
     "token", "tokens", "credential", "credentials", "secret", "secrets", "password", "passwords", "passwd",
     "apikey", "apikeys",
-})
-_CREDENTIAL_DATA_EXTENSIONS = frozenset({
-    "", ".json", ".txt", ".yaml", ".yml", ".toml", ".csv", ".ini", ".cfg", ".conf", ".properties", ".xml",
 })
 # Credential files known by their folder as well as their name, matched on the path's last two parts.
 _CREDENTIAL_PATH_ENDS = frozenset({(".kube", "config"), (".docker", "config.json"), (".aws", "config")})
@@ -174,8 +171,8 @@ def is_credential_file(path: str) -> bool:
     # A leading dot hides a file without changing what it holds: ".credentials.json" is Claude Code's token store.
     return (name in _CREDENTIAL_NAMES or name.lstrip(".") in _CREDENTIAL_NAMES or name.endswith(_CREDENTIAL_SUFFIXES)
             or name.startswith((".env.", ".env-", ".env_", ".envrc.", ".dev.vars."))
-            or ext in _CREDENTIAL_DATA_EXTENSIONS and (not _CREDENTIAL_WORDS.isdisjoint(words)
-                                                       or {"api", "key"} <= set(words)))
+            or file_priority(name) != 0 and ext not in _SECRETS_DIR_DOC_EXTENSIONS
+            and (not _CREDENTIAL_WORDS.isdisjoint(words) or {"api", "key"} <= set(words)))
 
 
 def _homes_parents() -> List[Path]:
@@ -431,7 +428,11 @@ def _read_file(root: Path, item: Dict, text_room: int, send_head: bool = True) -
         item["truncated"] = True
         return
     head = bytes(kept[:_SNIFF_BYTES])
-    if _PRIVATE_KEY_START.match(head) or (_PEM_START.match(head) and _PRIVATE_KEY_BLOCK.search(head)):
+    # A data or config file holding a key block anywhere (a service-account JSON under its default name) is a key too;
+    # code and docs that only quote one are still sent.
+    is_data = file_priority(item["path"]) in (1, 3)
+    if (_PRIVATE_KEY_START.match(head) or (_PEM_START.match(head) and _PRIVATE_KEY_BLOCK.search(head))
+            or (is_data and _PRIVATE_KEY_BLOCK.search(head))):
         # Withheld like a named credential file: the backend gets the name and size, never the key or its hash.
         item.pop("sha256", None)
         item["skipped"] = SKIPPED_SECRET_FILE

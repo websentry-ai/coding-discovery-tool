@@ -59,18 +59,21 @@ _PRIVATE_KEY_EXTENSIONS = frozenset({".pem", ".key", ".p12", ".pfx", ".jks", ".k
 _PRIVATE_KEY_NAMES = frozenset({
     "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "id_ecdsa_sk", "id_ed25519_sk", "secring.gpg",
 })
+# Key and state files that never come as templates: withheld whatever word their name carries ("sample-app" is an app).
+_NEVER_TEMPLATE_NAMES = frozenset({
+    "service-account.json", "service_account.json", "serviceaccountkey.json", "application_default_credentials.json",
+})
+_NEVER_TEMPLATE_SUFFIXES = (".tfstate", ".tfstate.backup")  # Terraform state holds resource secrets in plain text
+_NEVER_TEMPLATE_PREFIXES = ("client_secret",)  # Google OAuth: client_secret_<id>.apps.googleusercontent.com.json
+_NEVER_TEMPLATE_PARTS = ("firebase-adminsdk",)  # Firebase admin keys: <project>-firebase-adminsdk-<id>.json
 # Env and credential files: a template of one (.env.example, credentials.sample.json) has no real values and is sent.
 _CREDENTIAL_NAMES = frozenset({
     ".env", ".envrc", ".dev.vars", "credentials", "credentials.json", "credentials.yml", "credentials.yaml",
     "credentials.csv", "rootkey.csv", "secrets.json", "secrets.yml", "secrets.yaml", "secrets.toml", "token.json",
-    "tokens.json", ".token", "accounts.json", "service-account.json", "service_account.json",
-    "serviceaccountkey.json", "application_default_credentials.json", "kubeconfig", "auth.json",
+    "tokens.json", ".token", "accounts.json", "kubeconfig", "auth.json",
     ".netrc", ".npmrc", ".pypirc", ".pgpass", ".git-credentials", ".htpasswd",
 })
-# Terraform variables and state hold provider keys and resource secrets.
-_CREDENTIAL_EXTENSIONS = frozenset({".env", ".tfvars", ".tfstate"})
-_CREDENTIAL_NAME_PREFIXES = ("client_secret",)  # Google OAuth: client_secret_<id>.apps.googleusercontent.com.json
-_CREDENTIAL_NAME_PARTS = ("firebase-adminsdk",)  # Firebase admin keys: <project>-firebase-adminsdk-<id>.json
+_CREDENTIAL_SUFFIXES = (".env", ".tfvars", ".tfvars.json")  # Terraform variables hold provider keys
 # Credential files known by their folder as well as their name, matched on the path's last two parts.
 _CREDENTIAL_PATH_ENDS = frozenset({(".kube", "config"), (".docker", "config.json"), (".aws", "config")})
 # Data files in a secrets folder; its scripts and docs are still sent, so a payload can't hide there from the scan.
@@ -106,26 +109,35 @@ def file_priority(path: str) -> int:
     return 3
 
 
+def _is_template_name(name: str) -> bool:
+    """A template's usual name: the word last or just before the extension, or the first of two parts (example.env)."""
+    parts = [p for p in name.replace("-", ".").replace("_", ".").split(".") if p]
+    if len(parts) < 2:
+        return False
+    return parts[-1] in _TEMPLATE_MARKERS or parts[-2] in _TEMPLATE_MARKERS or (
+        len(parts) == 2 and parts[0] in _TEMPLATE_MARKERS)
+
+
 def is_credential_file(path: str) -> bool:
     """True for a file that holds the user's own credentials (.env, a private key, a token file), not a template."""
     parts = path.lower().split("/")
     name = parts[-1]
     ext = posixpath.splitext(name)[1]
-    if ext in _PRIVATE_KEY_EXTENSIONS or name in _PRIVATE_KEY_NAMES or tuple(parts[-2:]) in _CREDENTIAL_PATH_ENDS:
+    if (ext in _PRIVATE_KEY_EXTENSIONS or name in _PRIVATE_KEY_NAMES or tuple(parts[-2:]) in _CREDENTIAL_PATH_ENDS
+            or name.lstrip(".") in _NEVER_TEMPLATE_NAMES or name.endswith(_NEVER_TEMPLATE_SUFFIXES)
+            or ext == ".json" and (name.startswith(_NEVER_TEMPLATE_PREFIXES)
+                                   or any(part in name for part in _NEVER_TEMPLATE_PARTS))):
         return True
     # A data file in a secrets folder is withheld whatever its name says. A plain .txt there is usually a key, so only
     # code and written docs in a secrets folder are sent.
     if (any(part in _CREDENTIAL_DIR_NAMES for part in parts[:-1])
             and file_priority(path) != 0 and ext not in _SECRETS_DIR_DOC_EXTENSIONS):
         return True
-    # Whole name parts only, so ".env.dist" is a template while "redistribute.env" is not.
-    if _TEMPLATE_MARKERS.intersection(name.replace("-", ".").replace("_", ".").split(".")):
+    if _is_template_name(name):
         return False
     # A leading dot hides a file without changing what it holds: ".credentials.json" is Claude Code's token store.
     return (name in _CREDENTIAL_NAMES or name.lstrip(".") in _CREDENTIAL_NAMES or name.startswith(".env.")
-            or ext in _CREDENTIAL_EXTENSIONS
-            or name.startswith(_CREDENTIAL_NAME_PREFIXES) and ext == ".json"
-            or any(part in name for part in _CREDENTIAL_NAME_PARTS) and ext == ".json")
+            or name.endswith(_CREDENTIAL_SUFFIXES))
 
 
 def _homes_parents() -> List[Path]:

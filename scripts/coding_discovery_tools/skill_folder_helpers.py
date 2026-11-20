@@ -52,6 +52,30 @@ SKIP_DIR_NAMES = frozenset({
 })
 _SKIP_FILE_NAMES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
 
+# Files that hold the user's own credentials. They are listed by name and size only: their text, first bytes and hash
+# never leave the device.
+# Private keys are withheld whatever their name says ("dist.pem" is an iOS distribution key, not a template).
+_PRIVATE_KEY_EXTENSIONS = frozenset({".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".p8", ".ppk"})
+_PRIVATE_KEY_NAMES = frozenset({
+    "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "id_ecdsa_sk", "id_ed25519_sk", "secring.gpg",
+})
+# Env and credential files: a template of one (.env.example, credentials.sample.json) has no real values and is sent.
+_CREDENTIAL_NAMES = frozenset({
+    ".env", ".envrc", ".dev.vars", "credentials", "credentials.json", "credentials.yml", "credentials.yaml",
+    "credentials.csv", "rootkey.csv", "secrets.json", "secrets.yml", "secrets.yaml", "secrets.toml", "token.json",
+    "tokens.json", ".token", "accounts.json", "service-account.json", "service_account.json",
+    "serviceaccountkey.json", "application_default_credentials.json", "kubeconfig",
+    ".netrc", ".npmrc", ".pypirc", ".pgpass", ".git-credentials", ".htpasswd",
+})
+_CREDENTIAL_NAME_PREFIXES = ("client_secret",)  # Google OAuth: client_secret_<id>.apps.googleusercontent.com.json
+_CREDENTIAL_NAME_PARTS = ("firebase-adminsdk",)  # Firebase admin keys: <project>-firebase-adminsdk-<id>.json
+# Data files in a secrets folder; its scripts and docs are still sent, so a payload can't hide there from the scan.
+_CREDENTIAL_DIR_NAMES = frozenset({"secrets", ".secrets", "secret"})
+_SECRETS_DIR_DOC_EXTENSIONS = frozenset({".md", ".mdx", ".rst", ".html", ".htm"})
+_TEMPLATE_MARKERS = frozenset({"example", "sample", "template", "dist"})
+# The `skipped` value for such a file. The backend accepts it on a file it lists without content.
+SKIPPED_SECRET_FILE = "secret_file"
+
 # Mirrors ai-gateway-data skill_folder.file_priority: 0 code, 1 config, 2 docs, 3 everything else.
 _CODE_EXTENSIONS = frozenset({
     '.sh', '.bash', '.zsh', '.fish', '.ps1', '.psm1', '.bat', '.cmd', '.py', '.js', '.mjs', '.cjs', '.ts', '.tsx',
@@ -76,6 +100,25 @@ def file_priority(path: str) -> int:
     if ext in _DOC_EXTENSIONS:
         return 2
     return 3
+
+
+def is_credential_file(path: str) -> bool:
+    """True for a file that holds the user's own credentials (.env, a private key, a token file), not a template."""
+    parts = path.lower().split("/")
+    name = parts[-1]
+    ext = posixpath.splitext(name)[1]
+    if ext in _PRIVATE_KEY_EXTENSIONS or name in _PRIVATE_KEY_NAMES:
+        return True
+    # Whole name parts only, so ".env.dist" is a template while "redistribute.env" is not.
+    if _TEMPLATE_MARKERS.intersection(name.replace("-", ".").replace("_", ".").split(".")):
+        return False
+    if (name in _CREDENTIAL_NAMES or name.startswith(".env.") or ext == ".env"
+            or name.startswith(_CREDENTIAL_NAME_PREFIXES) and ext == ".json"
+            or any(part in name for part in _CREDENTIAL_NAME_PARTS) and ext == ".json"):
+        return True
+    in_secrets_dir = any(part in _CREDENTIAL_DIR_NAMES for part in parts[:-1])
+    # A plain .txt there is usually a key, so only code and written docs in a secrets folder are sent.
+    return in_secrets_dir and file_priority(path) != 0 and ext not in _SECRETS_DIR_DOC_EXTENSIONS
 
 
 def _homes_parents() -> List[Path]:
@@ -360,6 +403,11 @@ def collect_skill_files(skill_md: Path) -> Optional[List[Dict]]:
         for item in files:
             if item.get("truncated"):
                 continue  # listed only: a folder left unread, or a name that isn't UTF-8
+            if is_credential_file(item["path"]):
+                # The user's own secrets stay on the device: the backend gets the name and size, never a byte of it.
+                # Marked skipped, not truncated, so it reads as left out on purpose rather than cut off.
+                item["skipped"] = SKIPPED_SECRET_FILE
+                continue
             if time.monotonic() >= deadline or item["size"] > MAX_HASHED_FILE_BYTES:
                 # Listed by name only, out of time or too big to read: the backend scores it as unread content.
                 item["truncated"] = True

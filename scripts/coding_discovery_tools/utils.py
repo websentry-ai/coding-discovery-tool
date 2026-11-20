@@ -922,11 +922,6 @@ def machine_global_binary_owned_by_user(candidate: Path, user_home: Path) -> boo
     return owned
 
 
-def get_hostname() -> str:
-    """Get the system hostname."""
-    return platform.node()
-
-
 @functools.lru_cache(maxsize=1)
 def in_container() -> bool:
     """Best-effort detection of whether we're running inside a container.

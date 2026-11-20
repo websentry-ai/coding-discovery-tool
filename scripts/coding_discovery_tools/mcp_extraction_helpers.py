@@ -3212,13 +3212,14 @@ def extract_claudeai_mcp_servers_with_root_support(
     projects: List[Dict],
     home_filter: Optional[Callable[[Path], bool]] = None,
     include_desktop_sessions: bool = False,
+    keep_cli_names: bool = False,
 ) -> None:
     """
     Extract claude.ai native connectors with root user support.
 
     When running as root/admin, scans all user directories. Otherwise checks
     only the current user's home directory. `home_filter`, when given, skips
-    the CLI-derived names of every home for which it returns False.
+    the CLI-derived names of every home for which it returns False (unless `keep_cli_names`).
     `include_desktop_sessions` then appends connectors from the desktop app's
     session files, which `home_filter` does not gate; when `home_filter` passes
     and the CLI org's recent session files name any, those replace the list.
@@ -3233,7 +3234,7 @@ def extract_claudeai_mcp_servers_with_root_support(
             and replace_with_same_org_desktop_session_connectors(claude_dir, projects)
         ):
             return
-        if passes_filter:
+        if passes_filter or keep_cli_names:
             extract_claudeai_mcp_servers(claude_dir, projects)
         if include_desktop_sessions:
             append_desktop_session_claudeai_connectors(claude_dir, projects)

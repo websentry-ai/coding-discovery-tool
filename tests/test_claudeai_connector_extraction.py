@@ -457,7 +457,7 @@ class ClaudeAIDesktopSessionConnectorsTest(unittest.TestCase):
         expected = ["claude.ai Slack", "claude.ai Atlassian"]
         self.assertEqual(self._both_surfaces(), (expected, expected))
 
-    def test_claude_code_row_is_unchanged(self):
+    def test_default_call_is_unchanged(self):
         self._desktop_account()
         self._session([_connector("Slack")])
         projects = []
@@ -1052,7 +1052,7 @@ class ClaudeAISameOrgSessionConnectorsTest(unittest.TestCase):
             self.assertEqual(self._names("Claude Cowork"),
                              ["claude.ai Gmail", "claude.ai Vercel", "claude.ai Linear", "claude.ai Slack"])
 
-    def test_claude_code_row_is_unchanged(self):
+    def test_default_call_is_unchanged(self):
         self._signed_in()
         self._session([_connector("Linear")])
         projects = []
@@ -1074,6 +1074,73 @@ class ClaudeAISameOrgSessionConnectorsTest(unittest.TestCase):
         rendered = json.dumps(result)
         for private in ("SECRET-INSTRUCTIONS", "uuid-Slack", "mcp.example.com", "vendor", "acct-1", "org-1"):
             self.assertNotIn(private, rendered)
+
+
+class ClaudeAIClaudeCodeDesktopConnectorsTest(unittest.TestCase):
+    """The Claude Code row gets the desktop connectors without ever losing its CLI names."""
+
+    setUp = ClaudeAIDesktopSessionConnectorsTest.setUp
+    _session = ClaudeAIDesktopSessionConnectorsTest._session
+    _desktop_account = ClaudeAIDesktopSessionConnectorsTest._desktop_account
+
+    def _code_names(self):
+        projects = []
+        helpers.extract_claudeai_mcp_servers_with_root_support(
+            projects, home_filter=helpers.claude_cli_and_desktop_share_account,
+            include_desktop_sessions=True, keep_cli_names=True)
+        return [s["name"] for p in projects for s in p["mcpServers"]]
+
+    def test_shared_account_gets_the_same_org_list(self):
+        _sign_in_cli(self.home, STALE)
+        self._desktop_account()
+        self._session([_connector("Linear"), _connector("Slack")])
+        self.assertEqual(self._code_names(), ["claude.ai Linear", "claude.ai Slack"])
+
+    def test_account_mismatch_keeps_cli_names_and_appends_desktop_ones(self):
+        _sign_in_cli(self.home, STALE, account="cli-acct")
+        self._desktop_account()
+        self._session([_connector("Slack"), _connector("Linear")])
+        self.assertEqual(self._code_names(), STALE + ["claude.ai Slack"])
+
+    def test_cli_without_oauth_account_keeps_cli_names_and_appends(self):
+        _write_json(self.home / ".claude.json", {"claudeAiMcpEverConnected": STALE})
+        self._desktop_account()
+        self._session([_connector("Slack")])
+        self.assertEqual(self._code_names(), STALE + ["claude.ai Slack"])
+
+    def test_desktop_only_user_gets_the_session_connectors(self):
+        self._desktop_account()
+        self._session([_connector("Atlassian"), VISUALIZE])
+        self.assertEqual(self._code_names(), ["claude.ai Atlassian"])
+
+    def test_no_desktop_app_leaves_cli_names(self):
+        _sign_in_cli(self.home, STALE)
+        self.assertEqual(self._code_names(), STALE)
+
+    def test_unreadable_session_leaves_cli_names(self):
+        _sign_in_cli(self.home, STALE)
+        self._desktop_account()
+        self._session([_connector("Slack")])
+        with mock.patch.object(helpers, "_same_org_desktop_session_servers", side_effect=OSError("boom")), \
+                mock.patch.object(helpers, "_newest_desktop_session_connectors", side_effect=OSError("boom")):
+            self.assertEqual(self._code_names(), STALE)
+
+    def test_each_platform_extractor_requests_the_options(self):
+        import importlib
+        for platform_name in ("macos", "windows", "linux"):
+            module = importlib.import_module(
+                f"scripts.coding_discovery_tools.{platform_name}.claude_code.mcp_config_extractor")
+            extractor_class = next(v for k, v in vars(module).items() if k.endswith("MCPConfigExtractor") and v.__module__ == module.__name__)
+            with self.subTest(platform_name):
+                with mock.patch.object(module, "extract_claudeai_mcp_servers_with_root_support") as extract, \
+                        mock.patch.object(module, "extract_managed_mcp_config"), \
+                        mock.patch.object(module, "extract_dual_path_configs_with_root_support", return_value=[]), \
+                        mock.patch.object(module, "extract_claude_plugin_mcp_configs_with_root_support"), \
+                        mock.patch.object(extractor_class, "_extract_project_scope_configs", return_value=[]):
+                    extractor_class().extract_mcp_config()
+                self.assertEqual(extract.call_args.kwargs, {
+                    "home_filter": helpers.claude_cli_and_desktop_share_account,
+                    "include_desktop_sessions": True, "keep_cli_names": True})
 
 
 class ClaudeAISameOrgRootScanTest(unittest.TestCase):

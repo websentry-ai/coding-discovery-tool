@@ -1,8 +1,10 @@
 """main() against a real localhost backend: a skill's folder rides on its upload, and a changed script uploads again."""
 
 import copy
+import logging
 import os
 import platform
+import sys
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
@@ -59,9 +61,11 @@ class TestSkillFolderOnTheUpload(_DrivesMain, unittest.TestCase):
              "type": "command", "scope": "project"},
         ]}]}
 
-    def run_scan(self):
+    def run_scan(self, extra_args=()):
         backend = _ReplyingBackend('{"ok": true}')
         self.addCleanup(backend.close)
+        argv = ["ai_tools_discovery.py", "--api-key", "test-key-000000", "--domain", backend.url,
+                "--timeout", "12000"] + list(extra_args)
         extractor = _Extractor(self.result)
         detector = Mock()
         detector.get_device_id.return_value = "test-device"
@@ -82,6 +86,7 @@ class TestSkillFolderOnTheUpload(_DrivesMain, unittest.TestCase):
                 patch.object(adm, "find_claude_binary_for_user", return_value=None),
                 patch.object(adm, "get_claude_subscription_type", return_value=None),
                 patch.object(rr, "platform", _REAL_PLATFORM),
+                patch.object(sys, "argv", argv),
             ),
         )
         sf._FOLDER_CACHE.clear()  # each real run is its own process
@@ -107,6 +112,22 @@ class TestSkillFolderOnTheUpload(_DrivesMain, unittest.TestCase):
         self.assertEqual((len(first), len(unchanged), len(edited)), (1, 0, 1))
         self.assertNotEqual(edited[0]["payload_hash"], first[0]["payload_hash"])
         self.assertIn("q.sh", self.skills(edited[0])["deploy"]["files"][0]["content"])
+
+    def test_the_payload_log_shows_folder_file_sizes_not_their_contents(self):
+        (self.skill / "assets").mkdir()
+        (self.skill / "assets" / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+        root_logger = logging.getLogger()
+        self.addCleanup(root_logger.setLevel, root_logger.level)
+        with self.assertLogs(adm.payload_logger, level="INFO") as captured:
+            reports = self.run_scan(extra_args=("--payload",))
+        logged = "\n".join(captured.output)
+
+        files = {f["path"]: f for f in self.skills(reports[0])["deploy"]["files"]}
+        self.assertEqual(files["scripts/run.sh"]["content"], SCRIPT)  # the upload itself is unchanged
+        self.assertIn('"scripts/run.sh"', logged)
+        self.assertIn(f"<{len(SCRIPT)} chars>", logged)
+        self.assertNotIn("evil.example", logged)
+        self.assertNotIn(files["assets/logo.png"]["head"], logged)
 
 
 if __name__ == "__main__":

@@ -4684,6 +4684,12 @@ def main():
                                         for s in p.get("skills") or []:
                                             if "content" in s:
                                                 s["content"] = f"<{len(s['content'])} chars>"
+                                            # The skill's folder files too: the log shows their size, never their text.
+                                            for f in s.get("files") or []:
+                                                if "content" in f:
+                                                    f["content"] = f"<{len(f['content'])} chars>"
+                                                if "head" in f:
+                                                    f["head"] = f"<{len(f['head'])} base64 chars>"
                                         for mcp in p.get("mcpServers") or []:
                                             for tool in (mcp.get("scan") or {}).get("tools") or []:
                                                 tool.pop("inputSchema", None)

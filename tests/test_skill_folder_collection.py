@@ -201,11 +201,13 @@ class TestCredentialFiles(SkillFolderTestCase):
                      "application_default_credentials.json", "rootkey.csv", "credentials.csv", "kubeconfig",
                      ".streamlit/secrets.toml", ".git-credentials", "certs/server.key", "id_rsa", "id_ed25519_sk",
                      "secring.gpg", "AuthKey_ABC123.p8", "putty.ppk", ".secrets/x.yaml", "secret/api.txt",
-                     "secrets/token"):
+                     "secrets/token", "secrets/prod.example.json", "secret/dist.yaml", ".kube/config",
+                     "home/.docker/config.json", ".aws/config"):
             self.assertTrue(sf.is_credential_file(path), path)
         for path in (".env.example", "env.md", "environment.py", "envoy.yaml", "dotenv.py", "credentials.md",
                      "keys.py", "id_rsa.pub", "secret_sauce.py", "docs/secrets-management.md", "monkey.txt",
-                     "accounts.example.json", "account.py", "client.json", "tokenizer.json"):
+                     "accounts.example.json", "account.py", "client.json", "tokenizer.json", "config",
+                     "app/config.json", "docker/config.json", "kube/config"):
             self.assertFalse(sf.is_credential_file(path), path)
 
     def test_a_private_key_is_withheld_even_when_its_name_looks_like_a_template(self):

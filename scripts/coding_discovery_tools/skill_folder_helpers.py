@@ -69,6 +69,8 @@ _CREDENTIAL_NAMES = frozenset({
 })
 _CREDENTIAL_NAME_PREFIXES = ("client_secret",)  # Google OAuth: client_secret_<id>.apps.googleusercontent.com.json
 _CREDENTIAL_NAME_PARTS = ("firebase-adminsdk",)  # Firebase admin keys: <project>-firebase-adminsdk-<id>.json
+# Credential files known by their folder as well as their name, matched on the path's last two parts.
+_CREDENTIAL_PATH_ENDS = frozenset({(".kube", "config"), (".docker", "config.json"), (".aws", "config")})
 # Data files in a secrets folder; its scripts and docs are still sent, so a payload can't hide there from the scan.
 _CREDENTIAL_DIR_NAMES = frozenset({"secrets", ".secrets", "secret"})
 _SECRETS_DIR_DOC_EXTENSIONS = frozenset({".md", ".mdx", ".rst", ".html", ".htm"})
@@ -107,18 +109,19 @@ def is_credential_file(path: str) -> bool:
     parts = path.lower().split("/")
     name = parts[-1]
     ext = posixpath.splitext(name)[1]
-    if ext in _PRIVATE_KEY_EXTENSIONS or name in _PRIVATE_KEY_NAMES:
+    if ext in _PRIVATE_KEY_EXTENSIONS or name in _PRIVATE_KEY_NAMES or tuple(parts[-2:]) in _CREDENTIAL_PATH_ENDS:
+        return True
+    # A data file in a secrets folder is withheld whatever its name says. A plain .txt there is usually a key, so only
+    # code and written docs in a secrets folder are sent.
+    if (any(part in _CREDENTIAL_DIR_NAMES for part in parts[:-1])
+            and file_priority(path) != 0 and ext not in _SECRETS_DIR_DOC_EXTENSIONS):
         return True
     # Whole name parts only, so ".env.dist" is a template while "redistribute.env" is not.
     if _TEMPLATE_MARKERS.intersection(name.replace("-", ".").replace("_", ".").split(".")):
         return False
-    if (name in _CREDENTIAL_NAMES or name.startswith(".env.") or ext == ".env"
+    return (name in _CREDENTIAL_NAMES or name.startswith(".env.") or ext == ".env"
             or name.startswith(_CREDENTIAL_NAME_PREFIXES) and ext == ".json"
-            or any(part in name for part in _CREDENTIAL_NAME_PARTS) and ext == ".json"):
-        return True
-    in_secrets_dir = any(part in _CREDENTIAL_DIR_NAMES for part in parts[:-1])
-    # A plain .txt there is usually a key, so only code and written docs in a secrets folder are sent.
-    return in_secrets_dir and file_priority(path) != 0 and ext not in _SECRETS_DIR_DOC_EXTENSIONS
+            or any(part in name for part in _CREDENTIAL_NAME_PARTS) and ext == ".json")
 
 
 def _homes_parents() -> List[Path]:

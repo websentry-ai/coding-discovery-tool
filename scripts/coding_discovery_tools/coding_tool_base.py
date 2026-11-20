@@ -34,7 +34,7 @@ class BaseDeviceIdExtractor(ABC):
         Extract unique device identifier.
         
         Returns:
-            Device serial number or hostname as fallback
+            Device serial number
         """
         pass
 

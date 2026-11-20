@@ -825,7 +825,7 @@ class AIToolsDetector:
         Extract unique device identifier (serial number).
         
         Returns:
-            Device serial number or hostname as fallback
+            Device serial number
         """
         return self._device_id_extractor.extract_device_id()
 

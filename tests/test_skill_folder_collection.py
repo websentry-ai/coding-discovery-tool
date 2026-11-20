@@ -210,7 +210,8 @@ class TestCredentialFiles(SkillFolderTestCase):
                      "refresh-token", ".env-local", ".env_production", "prod.env.bak", "production.env.backup",
                      "credentials.json.bak", "server.pem.old", ".env~", "service-account-key.json", "gcp-sa-key.json",
                      "credentials.production.json", "token.csv", "prod-secrets.ini", "api_key.txt",
-                     "openai-api-key.txt", "apikey.json", "password.txt", "passwords.yaml"):
+                     "openai-api-key.txt", "apikey.json", "password.txt", "passwords.yaml",
+                     ".envrc.local", ".dev.vars.production"):
             self.assertTrue(sf.is_credential_file(path), path)
         for path in (".env.example", "env.md", "environment.py", "envoy.yaml", "dotenv.py", "credentials.md",
                      "keys.py", "id_rsa.pub", "secret_sauce.py", "docs/secrets-management.md", "monkey.txt",

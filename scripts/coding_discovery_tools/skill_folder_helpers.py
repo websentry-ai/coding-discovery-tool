@@ -168,7 +168,7 @@ def is_credential_file(path: str) -> bool:
         return False
     # A leading dot hides a file without changing what it holds: ".credentials.json" is Claude Code's token store.
     return (name in _CREDENTIAL_NAMES or name.lstrip(".") in _CREDENTIAL_NAMES or name.endswith(_CREDENTIAL_SUFFIXES)
-            or name.startswith((".env.", ".env-", ".env_"))
+            or name.startswith((".env.", ".env-", ".env_", ".envrc.", ".dev.vars."))
             or ext in _CREDENTIAL_DATA_EXTENSIONS and (not _CREDENTIAL_WORDS.isdisjoint(words)
                                                        or {"api", "key"} <= set(words)))
 

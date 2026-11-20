@@ -64,9 +64,11 @@ _CREDENTIAL_NAMES = frozenset({
     ".env", ".envrc", ".dev.vars", "credentials", "credentials.json", "credentials.yml", "credentials.yaml",
     "credentials.csv", "rootkey.csv", "secrets.json", "secrets.yml", "secrets.yaml", "secrets.toml", "token.json",
     "tokens.json", ".token", "accounts.json", "service-account.json", "service_account.json",
-    "serviceaccountkey.json", "application_default_credentials.json", "kubeconfig",
+    "serviceaccountkey.json", "application_default_credentials.json", "kubeconfig", "auth.json",
     ".netrc", ".npmrc", ".pypirc", ".pgpass", ".git-credentials", ".htpasswd",
 })
+# Terraform variables and state hold provider keys and resource secrets.
+_CREDENTIAL_EXTENSIONS = frozenset({".env", ".tfvars", ".tfstate"})
 _CREDENTIAL_NAME_PREFIXES = ("client_secret",)  # Google OAuth: client_secret_<id>.apps.googleusercontent.com.json
 _CREDENTIAL_NAME_PARTS = ("firebase-adminsdk",)  # Firebase admin keys: <project>-firebase-adminsdk-<id>.json
 # Credential files known by their folder as well as their name, matched on the path's last two parts.
@@ -119,7 +121,9 @@ def is_credential_file(path: str) -> bool:
     # Whole name parts only, so ".env.dist" is a template while "redistribute.env" is not.
     if _TEMPLATE_MARKERS.intersection(name.replace("-", ".").replace("_", ".").split(".")):
         return False
-    return (name in _CREDENTIAL_NAMES or name.startswith(".env.") or ext == ".env"
+    # A leading dot hides a file without changing what it holds: ".credentials.json" is Claude Code's token store.
+    return (name in _CREDENTIAL_NAMES or name.lstrip(".") in _CREDENTIAL_NAMES or name.startswith(".env.")
+            or ext in _CREDENTIAL_EXTENSIONS
             or name.startswith(_CREDENTIAL_NAME_PREFIXES) and ext == ".json"
             or any(part in name for part in _CREDENTIAL_NAME_PARTS) and ext == ".json")
 

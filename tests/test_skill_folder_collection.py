@@ -211,7 +211,8 @@ class TestCredentialFiles(SkillFolderTestCase):
                      "credentials.json.bak", "server.pem.old", ".env~", "service-account-key.json", "gcp-sa-key.json",
                      "credentials.production.json", "token.csv", "prod-secrets.ini", "api_key.txt",
                      "openai-api-key.txt", "apikey.json", "password.txt", "passwords.yaml",
-                     ".envrc.local", ".dev.vars.production"):
+                     ".envrc.local", ".dev.vars.production", ".aws/sso/cache/3f2a9c.json", ".ssh/known_hosts",
+                     ".config/gcloud/access_tokens.db", "server.der"):
             self.assertTrue(sf.is_credential_file(path), path)
         for path in (".env.example", "env.md", "environment.py", "envoy.yaml", "dotenv.py", "credentials.md",
                      "keys.py", "id_rsa.pub", "secret_sauce.py", "docs/secrets-management.md", "monkey.txt",
@@ -228,8 +229,12 @@ class TestCredentialFiles(SkillFolderTestCase):
         self.write("deploy_key", f"{header}\n{self.SECRET}\n")
         self.write("keys/github_work", f"\n{'-----BEGIN ' + 'RSA PRIVATE KEY-----'}\n{self.SECRET}\n")
         self.write("tls-guide.md", f"# TLS\nA key looks like this:\n{header}\n...\n")
+        ec = "-----BEGIN " + "EC PARAMETERS-----\nBggqhkjOPQMBBw==\n-----END EC PARAMETERS-----\n-----BEGIN " + "EC PRIVATE KEY-----"
+        self.write("certs/signer", f"{ec}\n{self.SECRET}\n")
+        self.write("certs/ca-bundle", "-----BEGIN " + "CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")
         files = self.by_path(self.collect())
-        for rel in ("deploy_key", "keys/github_work"):
+        self.assertIn("CERTIFICATE", files["certs/ca-bundle"]["content"])  # a public certificate is still sent
+        for rel in ("deploy_key", "keys/github_work", "certs/signer"):
             self.assertEqual(files[rel], {"path": rel, "size": files[rel]["size"], "skipped": "secret_file"}, rel)
         self.assertIn("A key looks like this", files["tls-guide.md"]["content"])
         self.assertNotIn(self.SECRET, json.dumps(list(files.values())))

@@ -56,7 +56,7 @@ _SKIP_FILE_NAMES = frozenset({".ds_store", "thumbs.db", "desktop.ini"})
 # Files that hold the user's own credentials. They are listed by name and size only: their text, first bytes and hash
 # never leave the device.
 # Private keys are withheld whatever their name says ("dist.pem" is an iOS distribution key, not a template).
-_PRIVATE_KEY_EXTENSIONS = frozenset({".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".p8", ".ppk"})
+_PRIVATE_KEY_EXTENSIONS = frozenset({".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".p8", ".ppk", ".der"})
 _PRIVATE_KEY_NAMES = frozenset({
     "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "id_ecdsa_sk", "id_ed25519_sk", "secring.gpg",
 })
@@ -91,6 +91,8 @@ _CREDENTIAL_DATA_EXTENSIONS = frozenset({
 _CREDENTIAL_PATH_ENDS = frozenset({(".kube", "config"), (".docker", "config.json"), (".aws", "config")})
 # Data files in a secrets folder; its scripts and docs are still sent, so a payload can't hide there from the scan.
 _CREDENTIAL_DIR_NAMES = frozenset({"secrets", ".secrets", "secret"})
+# Tool folders that hold only credentials and their caches (.aws/sso/cache/<hash>.json, .ssh/known keys, gcloud tokens).
+_CREDENTIAL_TOOL_DIR_NAMES = frozenset({".aws", ".ssh", ".gnupg", ".kube", ".docker", ".azure", "gcloud"})
 _SECRETS_DIR_DOC_EXTENSIONS = frozenset({".md", ".mdx", ".rst", ".html", ".htm"})
 _TEMPLATE_MARKERS = frozenset({"example", "sample", "template", "dist"})
 # The `skipped` value for such a file. The backend accepts it on a file it lists without content.
@@ -98,6 +100,9 @@ SKIPPED_SECRET_FILE = "secret_file"
 # A file that starts as a private key is one, whatever its name ("deploy_key", "github_work"); docs that only show
 # an example key further down are still sent.
 _PRIVATE_KEY_START = re.compile(rb"\s*(-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----|PuTTY-User-Key-File-)")
+# A PEM file can open with another block first, e.g. "EC PARAMETERS" before the "EC PRIVATE KEY".
+_PEM_START = re.compile(rb"\s*-----BEGIN [A-Z0-9 ]+-----")
+_PRIVATE_KEY_BLOCK = re.compile(rb"-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----")
 
 # Mirrors ai-gateway-data skill_folder.file_priority: 0 code, 1 config, 2 docs, 3 everything else.
 _CODE_EXTENSIONS = frozenset({
@@ -161,7 +166,7 @@ def is_credential_file(path: str) -> bool:
         return True
     # A data file in a secrets folder is withheld whatever its name says. A plain .txt there is usually a key, so only
     # code and written docs in a secrets folder are sent.
-    if (any(part in _CREDENTIAL_DIR_NAMES for part in parts[:-1])
+    if (any(part in _CREDENTIAL_DIR_NAMES or part in _CREDENTIAL_TOOL_DIR_NAMES for part in parts[:-1])
             and file_priority(path) != 0 and ext not in _SECRETS_DIR_DOC_EXTENSIONS):
         return True
     if _is_template_name(name):
@@ -425,7 +430,8 @@ def _read_file(root: Path, item: Dict, text_room: int, send_head: bool = True) -
     except OSError:
         item["truncated"] = True
         return
-    if _PRIVATE_KEY_START.match(bytes(kept[:_SNIFF_BYTES])):
+    head = bytes(kept[:_SNIFF_BYTES])
+    if _PRIVATE_KEY_START.match(head) or (_PEM_START.match(head) and _PRIVATE_KEY_BLOCK.search(head)):
         # Withheld like a named credential file: the backend gets the name and size, never the key or its hash.
         item.pop("sha256", None)
         item["skipped"] = SKIPPED_SECRET_FILE

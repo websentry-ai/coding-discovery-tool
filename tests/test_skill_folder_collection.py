@@ -209,7 +209,8 @@ class TestCredentialFiles(SkillFolderTestCase):
                      "client_secret_123-dist.apps.googleusercontent.com.json", "token.txt", "access_token.json",
                      "refresh-token", ".env-local", ".env_production", "prod.env.bak", "production.env.backup",
                      "credentials.json.bak", "server.pem.old", ".env~", "service-account-key.json", "gcp-sa-key.json",
-                     "credentials.production.json", "token.csv", "prod-secrets.ini"):
+                     "credentials.production.json", "token.csv", "prod-secrets.ini", "api_key.txt",
+                     "openai-api-key.txt", "apikey.json", "password.txt", "passwords.yaml"):
             self.assertTrue(sf.is_credential_file(path), path)
         for path in (".env.example", "env.md", "environment.py", "envoy.yaml", "dotenv.py", "credentials.md",
                      "keys.py", "id_rsa.pub", "secret_sauce.py", "docs/secrets-management.md", "monkey.txt",
@@ -218,8 +219,19 @@ class TestCredentialFiles(SkillFolderTestCase):
                      "auth.py", "authors.json", "env", "main.tf", "terraform.tfvars.json.example", "example.env",
                      "config.template.env", "credentials.sample.json", "token_counter.py", "tokenize.ts",
                      "environment.yml", "notes.bak", "README.md.orig", "sa.py", "keymap.json", "secret_scanner.py",
-                     "credentials-guide.md"):
+                     "credentials-guide.md", "api.py", "api-key-guide.md", "password_policy.md"):
             self.assertFalse(sf.is_credential_file(path), path)
+
+    def test_a_private_key_under_any_name_is_found_by_its_first_bytes(self):
+        header = "-----BEGIN " + "OPENSSH PRIVATE KEY-----"  # split so secret scanners don't flag the fixture
+        self.write("deploy_key", f"{header}\n{self.SECRET}\n")
+        self.write("keys/github_work", f"\n{'-----BEGIN ' + 'RSA PRIVATE KEY-----'}\n{self.SECRET}\n")
+        self.write("tls-guide.md", f"# TLS\nA key looks like this:\n{header}\n...\n")
+        files = self.by_path(self.collect())
+        for rel in ("deploy_key", "keys/github_work"):
+            self.assertEqual(files[rel], {"path": rel, "size": files[rel]["size"], "skipped": "secret_file"}, rel)
+        self.assertIn("A key looks like this", files["tls-guide.md"]["content"])
+        self.assertNotIn(self.SECRET, json.dumps(list(files.values())))
 
     def test_a_file_named_only_by_a_backup_extension_is_checked_without_hanging(self):
         for name in (".bak", ".backup", ".old", ".orig", ".save", "~", "~~", ".bak.bak"):

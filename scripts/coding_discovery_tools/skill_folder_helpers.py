@@ -11,6 +11,7 @@ import hashlib
 import logging
 import os
 import posixpath
+import re
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -79,7 +80,10 @@ _CREDENTIAL_SUFFIXES = (".env", ".tfvars", ".tfvars.json")  # Terraform variable
 _BACKUP_SUFFIXES = (".bak", ".backup", ".old", ".orig", ".save", "~")
 # Data files with one of these as a whole word in their name (token.txt, credentials.production.json, secrets.csv).
 # Code and docs with the same words (token_counter.py, secrets-management.md) are still sent.
-_CREDENTIAL_WORDS = frozenset({"token", "tokens", "credential", "credentials", "secret", "secrets"})
+_CREDENTIAL_WORDS = frozenset({
+    "token", "tokens", "credential", "credentials", "secret", "secrets", "password", "passwords", "passwd",
+    "apikey", "apikeys",
+})
 _CREDENTIAL_DATA_EXTENSIONS = frozenset({
     "", ".json", ".txt", ".yaml", ".yml", ".toml", ".csv", ".ini", ".cfg", ".conf", ".properties", ".xml",
 })
@@ -91,6 +95,9 @@ _SECRETS_DIR_DOC_EXTENSIONS = frozenset({".md", ".mdx", ".rst", ".html", ".htm"}
 _TEMPLATE_MARKERS = frozenset({"example", "sample", "template", "dist"})
 # The `skipped` value for such a file. The backend accepts it on a file it lists without content.
 SKIPPED_SECRET_FILE = "secret_file"
+# A file that starts as a private key is one, whatever its name ("deploy_key", "github_work"); docs that only show
+# an example key further down are still sent.
+_PRIVATE_KEY_START = re.compile(rb"\s*(-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----|PuTTY-User-Key-File-)")
 
 # Mirrors ai-gateway-data skill_folder.file_priority: 0 code, 1 config, 2 docs, 3 everything else.
 _CODE_EXTENSIONS = frozenset({
@@ -162,7 +169,8 @@ def is_credential_file(path: str) -> bool:
     # A leading dot hides a file without changing what it holds: ".credentials.json" is Claude Code's token store.
     return (name in _CREDENTIAL_NAMES or name.lstrip(".") in _CREDENTIAL_NAMES or name.endswith(_CREDENTIAL_SUFFIXES)
             or name.startswith((".env.", ".env-", ".env_"))
-            or ext in _CREDENTIAL_DATA_EXTENSIONS and not _CREDENTIAL_WORDS.isdisjoint(words))
+            or ext in _CREDENTIAL_DATA_EXTENSIONS and (not _CREDENTIAL_WORDS.isdisjoint(words)
+                                                       or {"api", "key"} <= set(words)))
 
 
 def _homes_parents() -> List[Path]:
@@ -417,6 +425,11 @@ def _read_file(root: Path, item: Dict, text_room: int, send_head: bool = True) -
     except OSError:
         item["truncated"] = True
         return
+    if _PRIVATE_KEY_START.match(bytes(kept[:_SNIFF_BYTES])):
+        # Withheld like a named credential file: the backend gets the name and size, never the key or its hash.
+        item.pop("sha256", None)
+        item["skipped"] = SKIPPED_SECRET_FILE
+        return
     if b"\x00" in kept[:_SNIFF_BYTES]:
         item["binary"] = True
         if send_head:
@@ -458,6 +471,8 @@ def collect_skill_files(skill_md: Path) -> Optional[List[Dict]]:
                 continue
             room = min(MAX_FILE_CONTENT_CHARS, text_budget) if with_text < MAX_FILES_WITH_CONTENT else 0
             _read_file(root, item, room, send_head=heads < MAX_BINARY_HEADS)
+            if item.get("skipped"):
+                continue  # a private key found by its first bytes: listed by name and size only
             heads += 1 if item.get("head") else 0
             if item.get("content"):
                 with_text += 1

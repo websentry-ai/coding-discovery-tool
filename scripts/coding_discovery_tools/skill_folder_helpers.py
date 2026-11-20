@@ -77,8 +77,12 @@ _CREDENTIAL_NAMES = frozenset({
 _CREDENTIAL_SUFFIXES = (".env", ".tfvars", ".tfvars.json")  # Terraform variables hold provider keys
 # A backup copy holds what the original holds: "credentials.json.bak" is checked as "credentials.json".
 _BACKUP_SUFFIXES = (".bak", ".backup", ".old", ".orig", ".save", "~")
-# Data files with "token" as a whole word in their name (token.txt, access_token.json); not code like token_counter.py.
-_TOKEN_DATA_EXTENSIONS = frozenset({"", ".json", ".txt", ".yaml", ".yml", ".toml"})
+# Data files with one of these as a whole word in their name (token.txt, credentials.production.json, secrets.csv).
+# Code and docs with the same words (token_counter.py, secrets-management.md) are still sent.
+_CREDENTIAL_WORDS = frozenset({"token", "tokens", "credential", "credentials", "secret", "secrets"})
+_CREDENTIAL_DATA_EXTENSIONS = frozenset({
+    "", ".json", ".txt", ".yaml", ".yml", ".toml", ".csv", ".ini", ".cfg", ".conf", ".properties", ".xml",
+})
 # Credential files known by their folder as well as their name, matched on the path's last two parts.
 _CREDENTIAL_PATH_ENDS = frozenset({(".kube", "config"), (".docker", "config.json"), (".aws", "config")})
 # Data files in a secrets folder; its scripts and docs are still sent, so a payload can't hide there from the scan.
@@ -132,8 +136,12 @@ def is_credential_file(path: str) -> bool:
     """True for a file that holds the user's own credentials (.env, a private key, a token file), not a template."""
     parts = path.lower().split("/")
     name = parts[-1]
-    while name.endswith(_BACKUP_SUFFIXES) and len(name) > 1:
-        name = name[:-1] if name.endswith("~") else posixpath.splitext(name)[0]
+    while name.endswith(_BACKUP_SUFFIXES):
+        # A file named only ".bak" has no extension to strip, so stop once nothing changes.
+        stripped = name[:-1] if name.endswith("~") else posixpath.splitext(name)[0]
+        if not stripped or stripped == name:
+            break
+        name = stripped
     ext = posixpath.splitext(name)[1]
     words = _name_parts(name)
     if (ext in _PRIVATE_KEY_EXTENSIONS or name in _PRIVATE_KEY_NAMES
@@ -154,7 +162,7 @@ def is_credential_file(path: str) -> bool:
     # A leading dot hides a file without changing what it holds: ".credentials.json" is Claude Code's token store.
     return (name in _CREDENTIAL_NAMES or name.lstrip(".") in _CREDENTIAL_NAMES or name.endswith(_CREDENTIAL_SUFFIXES)
             or name.startswith((".env.", ".env-", ".env_"))
-            or ext in _TOKEN_DATA_EXTENSIONS and ("token" in words or "tokens" in words))
+            or ext in _CREDENTIAL_DATA_EXTENSIONS and not _CREDENTIAL_WORDS.isdisjoint(words))
 
 
 def _homes_parents() -> List[Path]:

@@ -208,7 +208,8 @@ class TestCredentialFiles(SkillFolderTestCase):
                      "client_secret_example.json", "dist-app.env", "sample-app.env", "prod.auto.tfvars.json",
                      "client_secret_123-dist.apps.googleusercontent.com.json", "token.txt", "access_token.json",
                      "refresh-token", ".env-local", ".env_production", "prod.env.bak", "production.env.backup",
-                     "credentials.json.bak", "server.pem.old", ".env~", "service-account-key.json", "gcp-sa-key.json"):
+                     "credentials.json.bak", "server.pem.old", ".env~", "service-account-key.json", "gcp-sa-key.json",
+                     "credentials.production.json", "token.csv", "prod-secrets.ini"):
             self.assertTrue(sf.is_credential_file(path), path)
         for path in (".env.example", "env.md", "environment.py", "envoy.yaml", "dotenv.py", "credentials.md",
                      "keys.py", "id_rsa.pub", "secret_sauce.py", "docs/secrets-management.md", "monkey.txt",
@@ -216,8 +217,13 @@ class TestCredentialFiles(SkillFolderTestCase):
                      "app/config.json", "docker/config.json", "kube/config", "terraform.tfvars.example",
                      "auth.py", "authors.json", "env", "main.tf", "terraform.tfvars.json.example", "example.env",
                      "config.template.env", "credentials.sample.json", "token_counter.py", "tokenize.ts",
-                     "environment.yml", "notes.bak", "README.md.orig", "sa.py", "keymap.json"):
+                     "environment.yml", "notes.bak", "README.md.orig", "sa.py", "keymap.json", "secret_scanner.py",
+                     "credentials-guide.md"):
             self.assertFalse(sf.is_credential_file(path), path)
+
+    def test_a_file_named_only_by_a_backup_extension_is_checked_without_hanging(self):
+        for name in (".bak", ".backup", ".old", ".orig", ".save", "~", "~~", ".bak.bak"):
+            self.assertFalse(sf.is_credential_file(name), name)
 
     def test_a_private_key_is_withheld_even_when_its_name_looks_like_a_template(self):
         # "dist" is the usual name for an iOS distribution certificate, and a key's name can say anything.

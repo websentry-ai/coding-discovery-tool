@@ -118,6 +118,7 @@ try:
     from .install_path_version import (
         is_self_updating, is_unknown_version, newest_version, runtime_version, version_from_install_path)
     from .vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
+    from .skill_folder_helpers import attach_skill_folders
     from .plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from .path_containment import owned_boundary
     from .s3_uploader import compute_payload_hash
@@ -207,6 +208,7 @@ except ImportError:
     from scripts.coding_discovery_tools.install_path_version import (
         is_self_updating, is_unknown_version, newest_version, runtime_version, version_from_install_path)
     from scripts.coding_discovery_tools.vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
+    from scripts.coding_discovery_tools.skill_folder_helpers import attach_skill_folders
     from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
     from scripts.coding_discovery_tools.path_containment import owned_boundary
     from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
@@ -3020,6 +3022,11 @@ class AIToolsDetector:
             # Decode first so hooks, found by on-disk path, join the existing project rows.
             _normalize_encoded_paths(result)
             self._merge_hooks_into_projects(tool, result)
+            # Every skill extractor routes through here, so each SKILL.md skill gets its folder's other files.
+            try:
+                attach_skill_folders(result)
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.warning(f"Could not collect skill folders for {tool.get('name')}: {e}")
         return result
 
     def _copilot_xcode_workspace_surfaces(self) -> Dict[str, Dict[str, List]]:
@@ -4677,6 +4684,12 @@ def main():
                                         for s in p.get("skills") or []:
                                             if "content" in s:
                                                 s["content"] = f"<{len(s['content'])} chars>"
+                                            # The skill's folder files too: the log shows their size, never their text.
+                                            for f in s.get("files") or []:
+                                                if "content" in f:
+                                                    f["content"] = f"<{len(f['content'])} chars>"
+                                                if "head" in f:
+                                                    f["head"] = f"<{len(f['head'])} base64 chars>"
                                         for mcp in p.get("mcpServers") or []:
                                             for tool in (mcp.get("scan") or {}).get("tools") or []:
                                                 tool.pop("inputSchema", None)

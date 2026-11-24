@@ -129,6 +129,22 @@ class TestSkillFolderOnTheUpload(_DrivesMain, unittest.TestCase):
         self.assertNotIn("evil.example", logged)
         self.assertNotIn(files["assets/logo.png"]["head"], logged)
 
+    def test_a_folder_past_the_report_budget_is_sent_as_skill_md_only(self):
+        with patch.object(sf, "MAX_REPORT_FOLDER_BYTES", 10):
+            reports = self.run_scan()
+
+        self.assertEqual(len(reports), 1)
+        deploy = self.skills(reports[0])["deploy"]
+        self.assertNotIn("files", deploy)
+        self.assertEqual(deploy["content"], "Run scripts/run.sh.\n")
+
+    def test_a_report_too_big_for_the_backend_still_uploads_without_folders(self):
+        with patch.object(sf, "MAX_REPORT_BYTES", 300):
+            reports = self.run_scan()
+
+        self.assertEqual(len(reports), 1)  # the report arrives; only the folder is left out
+        self.assertNotIn("files", self.skills(reports[0])["deploy"])
+
 
 if __name__ == "__main__":
     unittest.main()

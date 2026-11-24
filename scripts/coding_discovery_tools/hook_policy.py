@@ -35,11 +35,11 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 try:
-    from .hooks_extractor import _command_of, _iter_commands
+    from .hooks_extractor import _command_of, _iter_commands, _program_path
     from .mcp_extraction_helpers import _strip_jsonc_comments, _strip_trailing_commas
     from .rule_read_helpers import read_rule_file_contained
 except ImportError:  # pragma: no cover - direct-script execution fallback
-    from hooks_extractor import _command_of, _iter_commands
+    from hooks_extractor import _command_of, _iter_commands, _program_path
     from mcp_extraction_helpers import _strip_jsonc_comments, _strip_trailing_commas
     from rule_read_helpers import read_rule_file_contained
 
@@ -224,36 +224,44 @@ def _runs_our_hook(doc: Dict, home: Path, managed_dir: Optional[Path]) -> bool:
         targets.append(managed_dir / "hooks" / "unbound.py")
     targets = [t for t in targets if t.is_file()]
     hooks = doc.get("hooks")
-    return any(_command_runs_our_hook(_command_of(hook)[1], targets)
+    return any(_command_runs_our_hook(_command_of(hook)[1], targets, home)
                for _, _, hook in _iter_commands(hooks if isinstance(hooks, dict) else {}))
-
-
-def _command_runs_our_hook(command: str, targets: List[Path]) -> bool:
-    """Unbound's hook as setup writes it (the unbound-hook binary, or
-    [py|python [-3]] "<dir>/hooks/unbound.py"), also when it is run further into
-    a shell line, as in `if [ -f X ]; then exec X; fi`. A path that is only an
-    argument (`cat X`) is not a run."""
-    if not command or not targets:
-        return False
-    try:
-        lexer = shlex.shlex(command, posix=(os.name != "nt"), punctuation_chars=True)
-        lexer.whitespace_split = True
-        tokens = [t.strip('"').strip("'") for t in lexer]
-    except ValueError:
-        return False
-    wanted = {os.path.normcase(os.path.normpath(str(t))) for t in targets}
-    starts = [0] + [i + 1 for i, t in enumerate(tokens) if t in _COMMAND_STARTERS]
-    return any(_runs_target(tokens[i:], wanted) for i in starts if i < len(tokens))
 
 
 # Shell words after which the next word is the program a line runs.
 _COMMAND_STARTERS = {";", "&&", "||", "|", "&", "then", "else", "do", "exec"}
 
 
-def _runs_target(words: List[str], wanted: set) -> bool:
-    if os.path.basename(words[0]).lower().removesuffix(".exe") in ("py", "python", "python3"):
-        words = [w for w in words[1:] if not w.startswith("-")]
-    return bool(words) and os.path.normcase(os.path.normpath(words[0])) in wanted
+def _command_runs_our_hook(command: str, targets: List[Path], home: Path) -> bool:
+    """Whether any program the shell line runs is one of ``targets``: the first
+    word, or one after a starter as in `if [ -f X ]; then exec X; fi`. Each
+    program is resolved the way hooks_extractor resolves a hook's (env, NAME=,
+    interpreters such as python3.11, ~ and $HOME for this user's home), plus
+    the Windows `py -3` launcher setup writes. A path that is only an argument
+    (`cat X`) is not a run."""
+    if not command or not targets:
+        return False
+    try:
+        # posix=False keeps each word's quotes, so a segment re-joined below
+        # still expands (or doesn't) the way the shell would.
+        lexer = shlex.shlex(command, posix=False, punctuation_chars=True)
+        lexer.whitespace_split = True
+        words = list(lexer)
+    except ValueError:
+        return False
+    wanted = {os.path.normcase(os.path.normpath(str(t))) for t in targets}
+    starts = [0] + [i + 1 for i, w in enumerate(words) if w in _COMMAND_STARTERS]
+    return any(_segment_runs(words[i:], wanted, home) for i in starts if i < len(words))
+
+
+def _segment_runs(words: List[str], wanted: set, home: Path) -> bool:
+    if os.path.basename(words[0].strip('"')).lower().removesuffix(".exe") == "py":
+        words = words[1:]
+        while words and words[0].startswith("-"):
+            words = words[1:]
+        words = ["python"] + words
+    program = _program_path(" ".join(words), None, None, home)
+    return program is not None and os.path.normcase(os.path.normpath(str(program))) in wanted
 
 
 # -- Codex ----------------------------------------------------------------------

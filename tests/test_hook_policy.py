@@ -125,6 +125,25 @@ class TestClaudeCodeHookPolicy(_FixtureMachine):
 
         self.assertFalse(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"])
 
+    def test_per_user_forms_of_our_user_script_count_when_installed_for_that_user(self):
+        # An org-wide console policy can't hold a per-user absolute path.
+        user_script = self.home / ".claude" / "hooks" / "unbound.py"
+        user_script.parent.mkdir()
+        user_script.write_text("#!/usr/bin/env python3\n")
+        for command in ('"$HOME/.claude/hooks/unbound.py"', "${HOME}/.claude/hooks/unbound.py",
+                        "~/.claude/hooks/unbound.py",
+                        'if [ -f "$HOME/.claude/hooks/unbound.py" ]; then exec "$HOME/.claude/hooks/unbound.py"; fi'):
+            self.console({"hooks": self.hooks_running(command)})
+            self.assertTrue(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"], command)
+        user_script.unlink()
+        self.assertFalse(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"])
+
+    def test_our_script_run_through_env_or_a_versioned_interpreter_counts(self):
+        for command in (f'/usr/bin/env python3 "{self.our_script}"', f'python3.11 "{self.our_script}"',
+                        f'/usr/bin/python3 -u "{self.our_script}"', f'py -3 "{self.our_script}"'):
+            self.console({"hooks": self.hooks_running(command)})
+            self.assertTrue(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"], command)
+
     def test_unbound_hook_binary_counts_as_our_hook(self):
         self.console({"hooks": self.hooks_running(
             f'"{self.our_binary}" hook claude-code PreToolUse')})

@@ -5,13 +5,15 @@ from itertools import accumulate
 from typing import Dict, Iterator, List, Pattern, Tuple
 
 # Bump RULES_VERSION on any change; a `value` group marks the secret inside a match, none means the whole match.
-RULES_VERSION = 5
+RULES_VERSION = 6
 
 # A quoted value that is a placeholder, a shell variable or a template, not a secret.
 _PLACEHOLDER = (
     r'(?![<{])(?!\$[({]|\$(?-i:[A-Z_][A-Z0-9_]*)["\'])(?![*xX]+["\'])'
     r'(?!(?:changeme|password|example|placeholder|redacted)["\'])(?!your[_-][^\'"\s]*["\'])'
 )
+# A URL password that is a shell/CI variable reference ($VAR, ${VAR}, ${{ ctx }}, $(cmd)), not a secret.
+_URL_VAR_PASSWORD = r'(?!\$[A-Z_][A-Z0-9_]*@|\$\{[^@\n]{1,100}\}@|\$\()'
 # A key that names a setting about the secret (its name, URL, TTL...) rather than holding it.
 _DESCRIPTOR_KEY = (
     r'(?![A-Za-z0-9_.-]{0,20}?(?:[_.-]|(?-i:(?<=[a-z0-9])(?=[A-Z])))'
@@ -93,7 +95,10 @@ SECRET_RULES: Tuple[Tuple[str, Pattern, Tuple[Pattern, ...]], ...] = (
     ),
     (
         'SECRET-011',
-        re.compile(r'(?:mongodb|mysql|postgresql|postgres)://[^:@/\s]{1,100}:(?P<value>[^@\n]{1,200})@'),
+        re.compile(
+            r'(?:mongodb|mysql|postgresql|postgres)://[^:@/\s]{1,100}:' + _URL_VAR_PASSWORD
+            + r'(?P<value>[^@\n]{1,200})@'
+        ),
         (),
     ),
     (
@@ -167,7 +172,7 @@ SECRET_RULES: Tuple[Tuple[str, Pattern, Tuple[Pattern, ...]], ...] = (
     ),
     (
         'SECRET-022',
-        re.compile(r'(?<=://)[^\s:@/]*:(?P<value>[^\s/@]+)@'),
+        re.compile(r'(?<=://)[^\s:@/]*:' + _URL_VAR_PASSWORD + r'(?P<value>[^\s/@]+)@'),
         (),
     ),
     (

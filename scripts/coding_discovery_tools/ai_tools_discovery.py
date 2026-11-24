@@ -118,7 +118,7 @@ try:
         VisualStudioMCPConfigExtractorFactory,
         VisualStudioRulesExtractorFactory,
     )
-    from .utils import _is_scanning_users_own_home, _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, copilot_xcode_probes, copilot_app_probes, vs_probes, windows_user_path_dirs, install_surface_listing
+    from .utils import _is_scanning_users_own_home, _windows_process_is_elevated, send_report_to_backend, send_scan_event, silence_sentry_on_this_thread, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, copilot_xcode_probes, copilot_app_probes, vs_probes, windows_user_path_dirs, install_surface_listing
     from .linux_extraction_helpers import linux_home_for_user
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import MACHINE_SCOPES, transform_settings_to_backend_format
@@ -210,7 +210,7 @@ except ImportError:
         VisualStudioMCPConfigExtractorFactory,
         VisualStudioRulesExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import _is_scanning_users_own_home, _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, copilot_xcode_probes, copilot_app_probes, vs_probes, windows_user_path_dirs, install_surface_listing
+    from scripts.coding_discovery_tools.utils import _is_scanning_users_own_home, _windows_process_is_elevated, send_report_to_backend, send_scan_event, silence_sentry_on_this_thread, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, copilot_xcode_probes, copilot_app_probes, vs_probes, windows_user_path_dirs, install_surface_listing
     from scripts.coding_discovery_tools.linux_extraction_helpers import linux_home_for_user
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import MACHINE_SCOPES, transform_settings_to_backend_format
@@ -3894,6 +3894,8 @@ def _start_scan_heartbeat(send_in_progress: Callable[[float], object]) -> Tuple[
     stop = threading.Event()
 
     def _beat() -> None:
+        # A failed beat is only logged: report_to_sentry is not thread-safe.
+        silence_sentry_on_this_thread()
         while not stop.wait(SCAN_HEARTBEAT_INTERVAL_SECONDS):
             try:
                 send_in_progress(time.monotonic() + SCAN_EVENT_SEND_SECONDS)

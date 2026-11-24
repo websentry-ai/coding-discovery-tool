@@ -17,6 +17,7 @@ import sqlite3
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 import traceback
 from datetime import datetime, timezone
@@ -3390,6 +3391,16 @@ _sentry_event_count = 0
 _sentry_consecutive_fails = 0
 _sentry_dead_this_run = False
 
+# Threads that may not report: the per-run state above has no lock.
+_sentry_thread_state = threading.local()
+
+
+def silence_sentry_on_this_thread() -> None:
+    """Make report_to_sentry a no-op on the calling thread, for a background
+    thread whose sends can fail (the scan heartbeat)."""
+    _sentry_thread_state.silenced = True
+
+
 # Held by reference, so the fields main() adds later (device_id, run_id) reach
 # every event without each call site having to thread the context through.
 _sentry_run_context: Dict = {}
@@ -3650,6 +3661,8 @@ def report_to_sentry(
             is still honored (no spam). Reserve for a single terminal event/run.
     """
     try:
+        if getattr(_sentry_thread_state, "silenced", False):
+            return
         dsn = _parse_sentry_dsn(_SENTRY_DSN)
         if not dsn:
             logger.debug("Sentry reporting skipped (no valid DSN configured)")

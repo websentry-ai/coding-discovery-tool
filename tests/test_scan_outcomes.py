@@ -121,12 +121,12 @@ class TestScanHeartbeats(unittest.TestCase):
             self.events.append({"run_id": args[3], "event": args[4]})
         return (True, None)
 
-    def _run_main(self, detect, send=None, *extra_argv):
+    def _run_main(self, detect, send=None, *extra_argv, sentry_dsn="", domain="http://127.0.0.1:1"):
         adm = self.adm
         detector = Mock()
         detector.get_device_id.return_value = "dev"
         detector.detect_all_tools.side_effect = detect
-        argv = ["ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1", *extra_argv]
+        argv = ["ai_tools_discovery.py", "--api-key", "k", "--domain", domain, *extra_argv]
         patches = [
             patch.object(adm, "SCAN_HEARTBEAT_INTERVAL_SECONDS", 0.05),
             patch.object(adm.platform, "system", return_value="Linux"),
@@ -146,7 +146,7 @@ class TestScanHeartbeats(unittest.TestCase):
             patch.object(adm, "home_is_readable", return_value=True),
             patch.object(adm, "get_audit_user", return_value="alice"),
             patch.object(adm, "report_to_sentry", Mock()),
-            patch.object(utils_mod, "_SENTRY_DSN", ""),
+            patch.object(utils_mod, "_SENTRY_DSN", sentry_dsn),
             patch.object(sys, "argv", argv),
         ]
         with ExitStack() as stack:
@@ -221,6 +221,35 @@ class TestScanHeartbeats(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(len(failed_at), 1, self.events)
         self.assertLess(failed_at[0] - crashed_at[0], 1.0, "the failed report waited on the heartbeat")
+
+    def test_heartbeat_send_failures_never_reach_sentry(self):
+        # report_to_sentry keeps unlocked per-run state and is main-thread only,
+        # so a failing heartbeat must not reach it. Real send_scan_event; curl is
+        # faked at subprocess.run, and both hosts are fake so nothing leaves.
+        sentry_threads = []
+        real_send = utils_mod.send_scan_event
+
+        def fake_run(argv, *args, **kwargs):
+            on_heartbeat = threading.current_thread().name == "scan-heartbeat"
+            if any("sentry.example.test" in str(a) for a in argv):
+                sentry_threads.append(threading.current_thread().name)
+                return subprocess.CompletedProcess(argv, 0, stdout="200", stderr="")
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="{}\n1 " + ("400" if on_heartbeat else "200"), stderr="")
+
+        def send(*args, **kwargs):
+            self._record(*args, **kwargs)
+            return real_send(*args, **kwargs)
+
+        utils_mod.reset_sentry_run_state()
+        with patch.object(utils_mod.subprocess, "run", side_effect=fake_run):
+            code = self._run_main(self._slow_detect, send=send,
+                                  sentry_dsn="https://key@sentry.example.test/1",
+                                  domain="https://backend.example.test")
+
+        self.assertIn(code, (0, None))
+        self.assertGreaterEqual([e["event"] for e in self.events].count("in_progress"), 3, self.events)
+        self.assertNotIn("scan-heartbeat", sentry_threads)
 
     def test_failing_heartbeat_send_never_breaks_the_scan(self):
         def send(*args, **kwargs):

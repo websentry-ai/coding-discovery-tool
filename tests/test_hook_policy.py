@@ -12,11 +12,13 @@ Seams:
 """
 
 import json
+import os
 import plistlib
 import shutil
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import ExitStack
 from pathlib import Path
@@ -266,14 +268,13 @@ class TestVSCodeHookPolicy(_FixtureMachine):
         self.assertIsNone(hook_policy_for("Cursor", self.home))
 
 
-class TestHookPolicyInReport(_FixtureMachine):
-    """The policy reaches the backend on the tool object it describes."""
+class _DiscoveryRun(_FixtureMachine):
+    """main() in-process with the detector and transport mocked."""
 
-    def test_claude_code_report_carries_hook_policy_and_other_tools_do_not(self):
+    def _run_main(self, *more):
+        """main() over a Claude Code and a Zed install for alice; returns the send_report_to_backend mock."""
         import scripts.coding_discovery_tools.ai_tools_discovery as adm
 
-        self.write_json(self.home / ".claude" / "remote-settings.json",
-                        {"hooks": self.hooks_running(self.our_hook_command())})
         tools = [{"name": "Claude Code", "install_path": "/x/claude", "version": "1"},
                  {"name": "Zed", "install_path": "/x/zed", "version": "1"}]
         detector = Mock()
@@ -317,22 +318,188 @@ class TestHookPolicyInReport(_FixtureMachine):
             patch.object(sys, "argv", argv),
         ]
         with ExitStack() as stack:
-            for p in patches:
+            for p in patches + list(more):
                 stack.enter_context(p)
             try:
                 adm.main()
             except SystemExit:
                 pass
+        return sent
 
+    @staticmethod
+    def _sent_tools(sent) -> dict:
         by_tool = {}
         for call in sent.call_args_list:
             report = call.args[2]
             for tool in report.get("tools") or []:
                 by_tool[tool["name"]] = tool
+        return by_tool
+
+
+class TestHookPolicyInReport(_DiscoveryRun):
+    """The policy reaches the backend on the tool object it describes."""
+
+    def test_claude_code_report_carries_hook_policy_and_other_tools_do_not(self):
+        self.write_json(self.home / ".claude" / "remote-settings.json",
+                        {"hooks": self.hooks_running(self.our_hook_command())})
+        by_tool = self._sent_tools(self._run_main())
         self.assertEqual(set(by_tool), {"Claude Code", "Zed"}, by_tool)
         self.assertEqual(by_tool["Claude Code"]["hook_policy"]["overriding_policy"], "console")
         self.assertTrue(by_tool["Claude Code"]["hook_policy"]["overriding_policy_has_our_hook"])
         self.assertNotIn("hook_policy", by_tool["Zed"])
+
+
+class TestDetectorNamesGetTheirPolicy(_FixtureMachine):
+    """hook_policy_for keys on the names the detectors emit. A detector that renames its row would
+    silently drop the policy, so the names come from the real detectors, on every OS."""
+
+    def test_claude_code_and_codex_detector_names_get_a_policy(self):
+        from scripts.coding_discovery_tools.coding_tool_factory import ToolDetectorFactory
+
+        self.write_json(self.home / ".claude" / "settings.json", {"disableAllHooks": False})
+        for os_name in ("Darwin", "Windows", "Linux"):
+            for detector in (ToolDetectorFactory.create_claude_detector(os_name),
+                             ToolDetectorFactory.create_codex_detector(os_name)):
+                with self.subTest(os=os_name, tool=detector.tool_name):
+                    policy = hook_policy_for(detector.tool_name, self.home)
+                    self.assertIsNotNone(policy)
+                    self.assertIs(policy["hooks_disabled"], False)
+
+    def _copilot_names(self, detector_cls):
+        """Every row name the detector gives a VS Code or Cursor Copilot install, marketplace and built-in."""
+        import importlib
+        detector = detector_cls()
+        users = self.root / "detect" / detector_cls.__name__
+        names = set()
+        # Marketplace: both extensions in VS Code and in Cursor.
+        for ext_dir in (".vscode/extensions", ".cursor/extensions"):
+            registry = users / "marketplace" / ext_dir / "extensions.json"
+            registry.parent.mkdir(parents=True, exist_ok=True)
+            registry.write_text(json.dumps([{"identifier": {"id": "github.copilot"}, "version": "1.0.0"},
+                                            {"identifier": {"id": "github.copilot-chat"}, "version": "0.30.0"}]))
+        names |= {row["name"] for row in detector._detect_vscode_for_user(users / "marketplace")}
+        # Built-in: the bundled folder as Copilot Chat and as plain Copilot.
+        module = importlib.import_module(detector_cls.__module__)
+        for package in ({"name": "copilot-chat", "version": "0.30.0"}, {"name": "copilot", "version": "1.0.0"}):
+            app_root = users / "app" / package["name"]
+            (app_root / "copilot").mkdir(parents=True)
+            (app_root / "copilot" / "package.json").write_text(json.dumps(package))
+            if hasattr(detector, "_vscode_app_extension_roots"):  # Windows
+                roots = patch.object(detector, "_vscode_app_extension_roots", return_value=[app_root])
+            elif hasattr(module, "_app_extension_roots"):  # macOS
+                roots = patch.object(module, "_app_extension_roots", return_value=[app_root])
+            else:  # Linux
+                roots = patch.object(module, "_VSCODE_APP_EXTENSION_ROOTS", [app_root])
+            with roots:
+                row = detector._bundled_copilot_row(users / "marketplace")
+            names.add(row["name"])
+        return names
+
+    def test_vscode_copilot_rows_get_a_policy_and_other_editors_do_not(self):
+        from scripts.coding_discovery_tools.linux.github_copilot.detect_copilot import LinuxCopilotDetector
+        from scripts.coding_discovery_tools.macos.github_copilot.detect_copilot import MacOSCopilotDetector
+        from scripts.coding_discovery_tools.windows.github_copilot.detect_copilot import WindowsGitHubCopilotDetector
+
+        self.write_json(self.home / "Library" / "Application Support" / "Code" / "User" / "settings.json",
+                        {"chat.useHooks": False})
+        for detector_cls in (MacOSCopilotDetector, LinuxCopilotDetector, WindowsGitHubCopilotDetector):
+            with self.subTest(detector_cls.__name__):
+                names = self._copilot_names(detector_cls)
+                self.assertTrue({"GitHub Copilot (VS Code)", "GitHub Copilot Chat (VS Code)"} <= names, names)
+                for name in names:
+                    policy = hook_policy_for(name, self.home)
+                    if name.endswith("(VS Code)"):
+                        self.assertEqual(policy and policy["hooks_disabled"], True, name)
+                    else:
+                        self.assertIsNone(policy, name)
+
+
+class TestHostileFiles(_FixtureMachine):
+    """Discovery runs as root over files users write. None of them may raise, hang or take long."""
+
+    def _within_a_second(self, tool_name):
+        result, errors = [], []
+
+        def call():
+            try:
+                result.append(hook_policy_for(tool_name, self.home))
+            except BaseException as e:  # hook_policy_for promises never to raise
+                errors.append(e)
+        worker = threading.Thread(target=call, daemon=True)
+        began = time.monotonic()
+        worker.start()
+        worker.join(timeout=5)
+        self.assertFalse(worker.is_alive(), f"{tool_name} policy read hung")
+        self.assertEqual(errors, [])
+        self.assertLess(time.monotonic() - began, 1.0)
+        return result[0]
+
+    def test_files_that_cannot_be_policies_never_break_the_read(self):
+        nested = "[" * 200000 + "]" * 200000
+        cases = [
+            ("an oversized console cache", "Claude Code", self.home / ".claude" / "remote-settings.json",
+             '{"a": "' + "x" * (2 * 1024 * 1024) + '"}'),
+            ("deeply nested user settings", "Claude Code", self.home / ".claude" / "settings.json",
+             '{"disableAllHooks": ' + nested + "}"),
+            ("deeply nested managed file", "Claude Code", self.claude_managed / "managed-settings.json", nested),
+            ("binary garbage MDM profile", "Claude Code", self.prefs / "com.anthropic.claudecode.plist",
+             b"bplist00\xff\xfe\x00garbage"),
+            ("binary garbage Codex profile", "Codex", self.prefs / "com.openai.codex.plist", b"\x00\x01\x02\x03"),
+            ("deeply nested Codex config", "Codex", self.home / ".codex" / "config.toml",
+             "[features]\nhooks = " + "[" * 200000 + "]" * 200000 + "\n"),
+            ("deeply nested VS Code settings", "GitHub Copilot (VS Code)",
+             self.home / "Library" / "Application Support" / "Code" / "User" / "settings.json", nested),
+        ]
+        for label, tool, path, content in cases:
+            with self.subTest(label):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content) if isinstance(content, bytes) else path.write_text(content)
+                try:
+                    policy = self._within_a_second(tool)
+                    self.assertTrue(policy is None or isinstance(policy, dict))
+                finally:
+                    path.unlink()
+
+    def test_a_fifo_in_place_of_a_policy_file_never_blocks(self):
+        fifos = [("Claude Code", self.home / ".claude" / "remote-settings.json"),
+                 ("Claude Code", self.home / ".claude" / "settings.json"),
+                 ("Claude Code", self.claude_managed / "managed-settings.json"),
+                 ("Claude Code", self.claude_managed / "managed-settings.d" / "10-fifo.json"),
+                 ("Codex", self.home / ".codex" / "config.toml"),
+                 ("GitHub Copilot (VS Code)",
+                  self.home / "Library" / "Application Support" / "Code" / "User" / "settings.json")]
+        for tool, path in fifos:
+            with self.subTest(str(path.relative_to(self.root))):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                os.mkfifo(path)
+                try:
+                    self._within_a_second(tool)
+                finally:
+                    path.unlink()
+
+
+class TestPayloadHashAcrossTheUpgrade(_DiscoveryRun):
+    """hook_policy joins the hashed tool object, so the first run after the upgrade re-uploads each tool
+    that has a policy, once. After that the hash must hold still, or every run re-uploads."""
+
+    def test_the_first_new_run_reuploads_policy_tools_once_and_the_next_dedups(self):
+        import scripts.coding_discovery_tools.ai_tools_discovery as adm
+
+        self.write_json(self.home / ".claude" / "remote-settings.json",
+                        {"hooks": self.hooks_running(self.our_hook_command())})
+        cache = [patch.object(adm.discovery_cache, "CACHE_PATH", self.root / "discovery-cache.json"),
+                 patch.object(adm.discovery_cache, "get_cached_hash", adm.discovery_cache.get_cached_hash),
+                 patch.object(adm.discovery_cache, "record_report", adm.discovery_cache.record_report),
+                 patch.object(adm, "_refresh_mcp_tools_cache", Mock())]
+        # The released discovery: the same tool objects, without hook_policy.
+        released = self._sent_tools(self._run_main(*cache, patch.object(adm, "hook_policy_for", return_value=None)))
+        self.assertEqual(set(released), {"Claude Code", "Zed"})
+        self.assertNotIn("hook_policy", released["Claude Code"])
+
+        first = self._sent_tools(self._run_main(*cache))
+        self.assertEqual(set(first), {"Claude Code"}, "only the tool whose payload changed goes up again")
+        self.assertIn("hook_policy", first["Claude Code"])
+        self.assertEqual(self._sent_tools(self._run_main(*cache)), {}, "an unchanged policy must dedup")
 
 
 if __name__ == "__main__":

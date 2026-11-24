@@ -59,7 +59,7 @@ CODEX_SYSTEM_DIRS = {
     "Windows": _WIN_PROGRAM_DATA / "OpenAI" / "Codex",
 }
 MANAGED_PREFERENCES_DIR = Path("/Library/Managed Preferences")
-UNBOUND_HOOK_BINARY = Path("/opt/unbound/current/unbound-hook/unbound-hook")
+UNBOUND_ROOT = Path("/opt/unbound")
 _VSCODE_USER_SETTINGS = {
     "Darwin": ("Library", "Application Support", "Code", "User", "settings.json"),
     "Linux": (".config", "Code", "User", "settings.json"),
@@ -218,8 +218,9 @@ def _claude_managed_files(managed_dir: Optional[Path]):
 def _runs_our_hook(doc: Dict, home: Path, managed_dir: Optional[Path]) -> bool:
     """Whether the policy runs an Unbound hook installed on this machine. One it
     names but this machine lacks (e.g. the script where the binary is installed)
-    runs nothing, so it doesn't count."""
-    targets = [UNBOUND_HOOK_BINARY, home / ".claude" / "hooks" / "unbound.py"]
+    runs nothing, so it doesn't count. The binary is matched by location (see
+    _is_unbound_binary); the scripts by path."""
+    targets = [home / ".claude" / "hooks" / "unbound.py"]
     if managed_dir is not None:
         targets.append(managed_dir / "hooks" / "unbound.py")
     targets = [t for t in targets if t.is_file()]
@@ -239,7 +240,7 @@ def _command_runs_our_hook(command: str, targets: List[Path], home: Path) -> boo
     interpreters such as python3.11, ~ and $HOME for this user's home), plus
     the Windows `py -3` launcher setup writes. A path that is only an argument
     (`cat X`) is not a run."""
-    if not command or not targets:
+    if not command:
         return False
     try:
         # posix=False keeps each word's quotes, so a segment re-joined below
@@ -261,7 +262,17 @@ def _segment_runs(words: List[str], wanted: set, home: Path) -> bool:
             words = words[1:]
         words = ["python"] + words
     program = _program_path(" ".join(words), None, None, home)
-    return program is not None and os.path.normcase(os.path.normpath(str(program))) in wanted
+    if program is None:
+        return False
+    return os.path.normcase(os.path.normpath(str(program))) in wanted or _is_unbound_binary(program)
+
+
+def _is_unbound_binary(program: Path) -> bool:
+    """An installed unbound-hook anywhere under /opt/unbound (current/ or a
+    version dir), as setup's own matcher accepts."""
+    root = os.path.normpath(str(UNBOUND_ROOT)) + os.sep
+    path = os.path.normpath(str(program))
+    return path.startswith(root) and os.path.basename(path) == "unbound-hook" and os.path.isfile(path)
 
 
 # -- Codex ----------------------------------------------------------------------

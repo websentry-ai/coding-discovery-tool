@@ -48,7 +48,8 @@ class _FixtureMachine(unittest.TestCase):
         self.our_script = self.claude_managed / "hooks" / "unbound.py"
         self.our_script.parent.mkdir()
         self.our_script.write_text("#!/usr/bin/env python3\n")
-        self.our_binary = self.root / "opt" / "unbound" / "current" / "unbound-hook" / "unbound-hook"
+        self.unbound_root = self.root / "opt" / "unbound"
+        self.our_binary = self.unbound_root / "current" / "unbound-hook" / "unbound-hook"
         self.our_binary.parent.mkdir(parents=True)
         self.our_binary.write_text("")
         self._stack = ExitStack()
@@ -57,7 +58,7 @@ class _FixtureMachine(unittest.TestCase):
             patch.dict(hook_policy.CLAUDE_MANAGED_DIRS, {"Darwin": self.claude_managed}),
             patch.dict(hook_policy.CODEX_SYSTEM_DIRS, {"Darwin": self.codex_system}),
             patch.object(hook_policy, "MANAGED_PREFERENCES_DIR", self.prefs),
-            patch.object(hook_policy, "UNBOUND_HOOK_BINARY", self.our_binary),
+            patch.object(hook_policy, "UNBOUND_ROOT", self.unbound_root),
         ):
             self._stack.enter_context(p)
 
@@ -149,6 +150,18 @@ class TestClaudeCodeHookPolicy(_FixtureMachine):
             f'"{self.our_binary}" hook claude-code PreToolUse')})
 
         self.assertTrue(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"])
+
+    def test_any_installed_unbound_hook_binary_under_opt_unbound_counts(self):
+        # setup accepts any /opt/unbound/... unbound-hook, e.g. a pinned version dir.
+        pinned = self.unbound_root / "0.1.46" / "unbound-hook" / "unbound-hook"
+        pinned.parent.mkdir(parents=True)
+        pinned.write_text("")
+        self.console({"hooks": self.hooks_running(f'"{pinned}" hook claude-code PreToolUse')})
+        self.assertTrue(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"])
+
+        missing = self.unbound_root / "0.1.40" / "unbound-hook" / "unbound-hook"
+        self.console({"hooks": self.hooks_running(f'"{missing}" hook claude-code PreToolUse')})
+        self.assertFalse(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"])
 
     def test_our_hook_that_is_not_installed_here_does_not_count(self):
         # The policy names Unbound's script, but this machine has the binary

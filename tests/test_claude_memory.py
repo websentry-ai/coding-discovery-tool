@@ -1263,7 +1263,8 @@ class TestMemorySecretRules(unittest.TestCase):
             self.assertGreater(finding["value_start"], finding["start"], text)
 
     def test_assignment_rule_skips_code_calls_but_keeps_passwords(self):
-        for text in ('"clientToken": str(uuid4())', "tokenTimestamp: getPart(1)", "mobileSessionToken: getPart(1, true)"):
+        code_lines = ('"clientToken": str(uuid4())', "tokenTimestamp: getPart(1)", "mobileSessionToken: getPart(1, true)")
+        for text in code_lines:
             found = [f for f in memory_secret_rules.find_secrets(text) if f["rule_id"] == "SECRET-021"]
             self.assertEqual(found, [], text)
         for text, value in (("password: Summer(2024)!", "Summer(2024)!"), ("db_password=hunter2pass9", "hunter2pass9")):

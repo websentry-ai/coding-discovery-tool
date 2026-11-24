@@ -152,7 +152,8 @@ SECRET_RULES: Tuple[Tuple[str, Pattern, Tuple[Pattern, ...]], ...] = (
         'SECRET-021',
         re.compile(
             r'(?:(?:password|passwd|pwd|passphrase)' + _KEY_TAIL
-            + r'|(?:secret|token|api_key|apikey)' + _KEY_TAIL + r'(?=[^\s\'"]{0,200}[A-Za-z]|[^\s\'"]{20,})'
+            + r'|(?:api_key|apikey)' + _KEY_TAIL + r'(?=[^\s\'"]{0,200}[A-Za-z]|[^\s\'"]{20,})'
+            + r'|(?:secret|token)' + _KEY_TAIL + r'(?=[^\s\'"]{0,200}[A-Za-z]|[^\s\'"]{20,})'
             # Only under a token or secret name: a whole dotted or camelCase call, or one holding (), is code.
             r'(?!(?-i:(?:[a-z_][\w.]{0,60}[.A-Z][\w.]{0,60}|[a-z_][\w.]{0,60}(?=\([\w.,()]{0,200}\(\)))'
             # The value must end at the closing ")", or at a "," where whitespace cut a call such as getPart(1, true).

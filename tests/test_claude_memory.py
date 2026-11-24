@@ -8,6 +8,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1261,6 +1262,25 @@ class TestMemorySecretRules(unittest.TestCase):
                 ("azure_api_key=" + "0123456789abcdef" * 2, "0123456789abcdef" * 2, "SECRET-019")):
             finding = self.assert_spans(text, value, rule_id)
             self.assertGreater(finding["value_start"], finding["start"], text)
+
+    def test_assignment_rule_skips_code_calls_but_keeps_passwords(self):
+        code_lines = ('"clientToken": str(uuid4())', "tokenTimestamp: getPart(1)", "mobileSessionToken: getPart(1, true)")
+        for text in code_lines:
+            found = [f for f in memory_secret_rules.find_secrets(text) if f["rule_id"] == "SECRET-021"]
+            self.assertEqual(found, [], text)
+        for text, value in (("password: Summer(2024)!", "Summer(2024)!"), ("password: summer(2024)!", "summer(2024)!"),
+                            ("password: myPass(2024)!", "myPass(2024)!"), ("secret: my_pass(2024)!", "my_pass(2024)!"),
+                            ("password: myPass(2024)", "myPass(2024)"), ("pwd: myPass(2024", "myPass(2024"),
+                            ("token: myPass(2024", "myPass(2024"), ("api_key: myPass(2024)", "myPass(2024)"),
+                            ("secret: client_se(claude)x9", "client_se(claude)x9"),
+                            ("db_password=hunter2pass9", "hunter2pass9")):
+            self.assert_spans(text, value, "SECRET-021")
+
+    def test_assignment_rule_stays_fast_on_a_long_value(self):
+        for value in ("a" + "B1" * 50000, "aB.c" + "B1" * 50000 + "("):
+            started = time.monotonic()
+            memory_secret_rules.find_secrets("token: " + value)
+            self.assertLess(time.monotonic() - started, 1.0)
 
     def test_url_credential_rules_have_the_value_span_on_the_password(self):
         for text, value, rule_id in (

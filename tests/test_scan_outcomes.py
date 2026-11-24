@@ -13,6 +13,7 @@ Seams:
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -120,12 +121,12 @@ class TestScanHeartbeats(unittest.TestCase):
             self.events.append({"run_id": args[3], "event": args[4]})
         return (True, None)
 
-    def _run_main(self, detect, send=None):
+    def _run_main(self, detect, send=None, *extra_argv):
         adm = self.adm
         detector = Mock()
         detector.get_device_id.return_value = "dev"
         detector.detect_all_tools.side_effect = detect
-        argv = ["ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1"]
+        argv = ["ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1", *extra_argv]
         patches = [
             patch.object(adm, "SCAN_HEARTBEAT_INTERVAL_SECONDS", 0.05),
             patch.object(adm.platform, "system", return_value="Linux"),
@@ -205,6 +206,94 @@ class TestScanHeartbeats(unittest.TestCase):
         self.assertIn(code, (0, None))
         self.assertEqual(self.events[-1]["event"], "completed")
         self._assert_heartbeat_stopped()
+
+    def test_heartbeats_never_outlast_the_runs_send_deadline(self):
+        # --timeout 8 keeps 2 s back for the last sends: the run's send deadline is 6 s in, sooner than
+        # a heartbeat's own 10 s budget, so every heartbeat must be clipped to it.
+        deadlines = []
+
+        def send(*args, **kwargs):
+            deadlines.append((args[4], kwargs.get("deadline")))
+            return self._record(*args, **kwargs)
+
+        code = self._run_main(self._slow_detect, send, "--timeout", "8")
+
+        self.assertIn(code, (0, None))
+        start = deadlines[0][1]
+        self.assertIsNotNone(start)
+        beats = [d for event, d in deadlines[1:] if event == "in_progress"]
+        self.assertGreaterEqual(len(beats), 2, deadlines)
+        self.assertTrue(all(d <= start for d in beats), f"a heartbeat outran the send deadline: {deadlines}")
+        self._assert_heartbeat_stopped()
+
+
+class _HungBackend:
+    """Accepts connections and never answers: a backend that stalls mid-request."""
+
+    def __init__(self):
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(16)
+        self.url = "http://127.0.0.1:%d" % self.sock.getsockname()[1]
+        self.accepted, self.held = [], []
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def _accept(self):
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            self.held.append(conn)
+            self.accepted.append(time.monotonic())
+
+    def close(self):
+        self.sock.close()
+        for conn in self.held:
+            conn.close()
+
+
+class TestHeartbeatSendBudget(unittest.TestCase):
+    """The heartbeat's sends are real curl requests here; only the backend misbehaves."""
+
+    def setUp(self):
+        import scripts.coding_discovery_tools.ai_tools_discovery as adm
+        self.adm = adm
+        self.backend = _HungBackend()
+        self.addCleanup(self.backend.close)
+        for p in (patch.object(utils_mod, "_SENTRY_DSN", ""),
+                  patch.object(utils_mod, "report_to_sentry", Mock())):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _send_in_progress(self, deadline):
+        return utils_mod.send_scan_event(self.backend.url, "k", "dev", "run-1", "in_progress", deadline=deadline)
+
+    def test_a_send_past_its_deadline_never_reaches_the_backend(self):
+        began = time.monotonic()
+        success, _ = self._send_in_progress(time.monotonic() - 1)
+        self.assertFalse(success)
+        self.assertLess(time.monotonic() - began, 1.0)
+        time.sleep(0.2)
+        self.assertEqual(self.backend.accepted, [])
+
+    def test_stopping_during_a_hung_send_waits_at_most_one_send_budget(self):
+        with patch.object(self.adm, "SCAN_HEARTBEAT_INTERVAL_SECONDS", 0.05):
+            heartbeat = self.adm._start_scan_heartbeat(self._send_in_progress)
+            waited = time.monotonic() + 5
+            while not self.backend.accepted and time.monotonic() < waited:
+                time.sleep(0.02)
+            self.assertTrue(self.backend.accepted, "the heartbeat never sent")
+            began = time.monotonic()
+            self.adm._stop_scan_heartbeat(heartbeat)
+            stopped_at = time.monotonic()
+        budget = self.adm.SCAN_EVENT_SEND_SECONDS
+        self.assertLessEqual(stopped_at - began, budget + 1)
+        # Past its budget the send gives up, so nothing of the heartbeat outlives the run's next step.
+        heartbeat[1].join(timeout=2)
+        self.assertFalse(heartbeat[1].is_alive(), "a heartbeat send outlived its budget")
+        self.assertEqual([t for t in self.backend.accepted if t > stopped_at], [],
+                         "a heartbeat request started after the stop")
 
 
 if __name__ == "__main__":

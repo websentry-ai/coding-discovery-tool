@@ -155,7 +155,8 @@ SECRET_RULES: Tuple[Tuple[str, Pattern, Tuple[Pattern, ...]], ...] = (
             + r'|(?:secret|token|api_key|apikey)' + _KEY_TAIL + r'(?=[^\s\'"]{0,200}[A-Za-z]|[^\s\'"]{20,})'
             # Only under a token or secret name: a whole dotted or camelCase call, or one holding (), is code.
             r'(?!(?-i:(?:[a-z_][\w.]{0,60}[.A-Z][\w.]{0,60}|[a-z_][\w.]{0,60}(?=\([\w.,()]{0,200}\(\)))'
-            r'\([\w.,()]{0,200}[`,;]{0,2}(?![^\s\'"]))))'
+            # The value must end at the closing ")", or at a "," where whitespace cut a call such as getPart(1, true).
+            r'\((?:[\w.,()]{0,200}\)[`,;]{0,2}|[\w.()]{0,200},)(?![^\s\'"]))))'
             r'(?=[^\s\'"]{0,200}[0-9])'
             r'(?!(?:none|null|true|false|required|optional|string|changeme)(?![^\s\'"])|xxx)'
             r'(?P<value>[^\s\'"]{8,})',

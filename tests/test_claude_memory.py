@@ -1271,6 +1271,8 @@ class TestMemorySecretRules(unittest.TestCase):
         for text, value in (("password: Summer(2024)!", "Summer(2024)!"), ("password: summer(2024)!", "summer(2024)!"),
                             ("password: myPass(2024)!", "myPass(2024)!"), ("secret: my_pass(2024)!", "my_pass(2024)!"),
                             ("password: myPass(2024)", "myPass(2024)"), ("pwd: myPass(2024", "myPass(2024"),
+                            ("token: myPass(2024", "myPass(2024"),
+                            ("secret: client_se(claude)x9", "client_se(claude)x9"),
                             ("db_password=hunter2pass9", "hunter2pass9")):
             self.assert_spans(text, value, "SECRET-021")
 

@@ -194,6 +194,34 @@ class TestScanHeartbeats(unittest.TestCase):
         self.assertNotIn("completed", names)
         self._assert_heartbeat_stopped()
 
+    def test_heartbeat_on_the_wire_does_not_delay_the_failed_report(self):
+        # The failed report runs on a bounded budget before the process exits; a
+        # heartbeat send still in flight must not spend it.
+        release = threading.Event()
+        crashed_at, failed_at = [], []
+
+        def send(*args, **kwargs):
+            self._record(*args, **kwargs)
+            if args[4] == "failed":
+                failed_at.append(time.monotonic())
+            elif args[4] == "in_progress" and threading.current_thread().name == "scan-heartbeat":
+                release.wait(3)  # a slow backend holding this heartbeat
+            return (True, None)
+
+        def detect_then_crash(*args, **kwargs):
+            time.sleep(0.3)
+            crashed_at.append(time.monotonic())
+            raise RuntimeError("detector blew up")
+
+        try:
+            code = self._run_main(detect_then_crash, send=send)
+        finally:
+            release.set()
+
+        self.assertEqual(code, 1)
+        self.assertEqual(len(failed_at), 1, self.events)
+        self.assertLess(failed_at[0] - crashed_at[0], 1.0, "the failed report waited on the heartbeat")
+
     def test_failing_heartbeat_send_never_breaks_the_scan(self):
         def send(*args, **kwargs):
             self._record(*args, **kwargs)

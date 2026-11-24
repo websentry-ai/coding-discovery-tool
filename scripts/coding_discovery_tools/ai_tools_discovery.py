@@ -3905,14 +3905,17 @@ def _start_scan_heartbeat(send_in_progress: Callable[[float], object]) -> Tuple[
     return stop, thread
 
 
-def _stop_scan_heartbeat(heartbeat: Optional[Tuple[threading.Event, threading.Thread]]) -> None:
-    """Stop the heartbeat and wait out a send already on the wire, so no
-    in_progress can reach the backend after the run's outcome."""
+def _stop_scan_heartbeat(heartbeat: Optional[Tuple[threading.Event, threading.Thread]],
+                         wait: bool = True) -> None:
+    """Stop the heartbeat. With ``wait``, also give a send already on the wire up
+    to SCAN_EVENT_SEND_SECONDS to finish first. Best-effort ordering only: an
+    in_progress that lands after the outcome just refreshes last_heartbeat on
+    the backend and never changes the scan's status."""
     if heartbeat is None:
         return
     stop, thread = heartbeat
     stop.set()
-    if thread is not threading.current_thread():
+    if wait and thread is not threading.current_thread():
         thread.join(timeout=SCAN_EVENT_SEND_SECONDS)
 
 
@@ -4149,7 +4152,8 @@ def main():
         if _cleanup_done[0]:
             return
         _cleanup_done[0] = True
-        _stop_scan_heartbeat(_scan_heartbeat[0])
+        # No wait: this report runs on a bounded budget before the process exits.
+        _stop_scan_heartbeat(_scan_heartbeat[0], wait=False)
         if not (device_id and run_id):
             return
         try:

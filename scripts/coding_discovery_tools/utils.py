@@ -2,6 +2,7 @@
 Utility functions shared across the AI tools discovery system
 """
 
+import copy
 import functools
 import json
 import logging
@@ -1677,6 +1678,16 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
     payload = dict(report)
     if app_name:
         payload["app_name"] = app_name
+
+    # Skill folders are an add-on: a report too big for the backend goes without them, never not at all.
+    # Done before the hash, so the hash matches what is sent.
+    from . import skill_folder_helpers
+    if isinstance(payload.get("tools"), list) and len(json.dumps(payload)) > skill_folder_helpers.MAX_REPORT_BYTES:
+        payload["tools"] = copy.deepcopy(payload["tools"])
+        dropped = skill_folder_helpers.drop_all_folders(payload)
+        if dropped:
+            logger.warning(f"Report is over {skill_folder_helpers.MAX_REPORT_BYTES // (1024 * 1024)} MB; "
+                           f"sending {dropped} skill(s) as SKILL.md only, without their folders")
 
     # Stamp tool_name + hash atomically; backend uses both to dedup unchanged re-scans.
     from .s3_uploader import compute_payload_hash, should_use_s3, try_s3_upload

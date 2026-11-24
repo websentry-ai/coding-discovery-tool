@@ -8,13 +8,14 @@ import base64
 import copy
 import functools
 import hashlib
+import json
 import logging
 import os
 import posixpath
 import re
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .constants import is_symlink_or_junction
 from .rule_read_helpers import _dir_real_path, _fd_real_path, _open_checked
@@ -26,6 +27,10 @@ SKILL_FILE_NAME = "SKILL.md"
 MAX_FILE_CONTENT_CHARS = 51_200
 MAX_FILES_WITH_CONTENT = 100
 MAX_TOTAL_CONTENT_CHARS = 200_000
+# Folders one tool report may carry, as sent JSON. A skill whose folder doesn't fit goes as SKILL.md only, as before.
+MAX_REPORT_FOLDER_BYTES = 8 * 1024 * 1024
+# A report still bigger than this drops every folder before upload; the backend refuses one over 15 MiB whole.
+MAX_REPORT_BYTES = 14 * 1024 * 1024
 # Past the backend's 1,000 listed files: it picks which to keep, unreadable binaries and scripts first.
 MAX_WALKED_FILES = 5000
 # Stands for a folder the walk could not finish (too deep, too many files, out of time). It has no extension, so
@@ -511,3 +516,58 @@ def attach_skill_folders(tool_result: Dict) -> None:
             files = collect_skill_files(path)
             if files is not None:
                 skill["files"] = files
+    dropped = fit_folder_budget(tool_result)
+    if any(dropped):
+        logger.info(f"Past the {MAX_REPORT_FOLDER_BYTES // (1024 * 1024)} MB report budget for "
+                    f"{tool_result.get('name')}: {dropped[0]} file(s) listed by name only, "
+                    f"{dropped[1]} skill(s) sent as SKILL.md only")
+
+
+def _folder_skills(tool_result: Dict):
+    """Every skill in a tool's result that carries a folder (`files`)."""
+    for project in tool_result.get("projects") or []:
+        for skill in (project.get("skills") or []) if isinstance(project, dict) else []:
+            if isinstance(skill, dict) and isinstance(skill.get("files"), list):
+                yield skill
+
+
+def _leave_unread(item: Dict) -> None:
+    """Keep a file's name, size and hash but not its text or head, like a file past a folder's own limits."""
+    if item.pop("content", None) is not None:
+        item["truncated"] = True
+    item.pop("head", None)
+
+
+def fit_folder_budget(tool_result: Dict, budget: Optional[int] = None) -> Tuple[int, int]:
+    """Fit a tool report's skill folders into its budget, in place, skill by skill in report order.
+
+    Each skill's SKILL.md is counted first and always sent. Its files follow in order while they fit; one that
+    doesn't is listed by name only. A skill reached with no budget left goes as SKILL.md only, as before folders were
+    sent. Returns (files listed by name only, skills sent as SKILL.md only)."""
+    room = MAX_REPORT_FOLDER_BYTES if budget is None else budget
+    unread = skill_md_only = 0
+    for skill in list(_folder_skills(tool_result)):
+        room -= len(json.dumps(skill.get("content") or ""))
+        if room <= 0:
+            del skill["files"]
+            skill_md_only += 1
+            continue
+        for item in skill["files"]:
+            size = len(json.dumps(item))
+            if size > room and (item.get("content") is not None or item.get("head")):
+                _leave_unread(item)
+                unread += 1
+                size = len(json.dumps(item))
+            room -= size
+    return unread, skill_md_only
+
+
+def drop_all_folders(report: Dict) -> int:
+    """Remove every skill's folder from a report's tools, in place, so each goes as SKILL.md only; returns how many."""
+    dropped = 0
+    for tool in report.get("tools") or []:
+        if isinstance(tool, dict):
+            for skill in list(_folder_skills(tool)):
+                del skill["files"]
+                dropped += 1
+    return dropped

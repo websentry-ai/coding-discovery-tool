@@ -745,5 +745,127 @@ class TestAttach(SkillFolderTestCase):
             self.assertLessEqual(set(f), allowed)
 
 
+def _folder(name, chars):
+    return [{"path": f"{name}.py", "size": chars, "sha256": "0" * 64, "content": "x" * chars}]
+
+
+def _skill(name, files=None):
+    skill = {"skill_name": name, "file_name": "SKILL.md", "content": f"# {name}\n", "type": "skill"}
+    if files is not None:
+        skill["files"] = files
+    return skill
+
+
+def _sized(skill):
+    return len(json.dumps(skill["content"]))
+
+
+class TestReportFolderBudget(unittest.TestCase):
+    """A report's folders share one budget: SKILL.md first, then its files while they fit; with none left, SKILL.md only."""
+
+    def result(self, *skills):
+        return {"name": "Claude Code", "projects": [{"path": "/w", "skills": list(skills)}]}
+
+    def test_folders_that_fit_are_left_as_they_are(self):
+        result = self.result(_skill("a", _folder("a", 100)), _skill("b", _folder("b", 100)))
+        before = json.dumps(result)
+        self.assertEqual(sf.fit_folder_budget(result, budget=10_000), (0, 0))
+        self.assertEqual(json.dumps(result), before)
+
+    def test_files_fill_the_budget_in_order_and_the_rest_are_listed_by_name(self):
+        files = _folder("one", 100) + _folder("two", 100)
+        skill = _skill("a", files)
+        budget = _sized(skill) + len(json.dumps(files[0])) + 10
+
+        self.assertEqual(sf.fit_folder_budget(self.result(skill), budget=budget), (1, 0))
+
+        first, second = skill["files"]
+        self.assertEqual(first["content"], "x" * 100)  # fitted, sent as it is
+        self.assertNotIn("content", second)  # listed by name, size and hash only, like a file past folder limits
+        self.assertTrue(second["truncated"])
+        self.assertEqual((second["path"], second["size"], second["sha256"]), ("two.py", 100, "0" * 64))
+        self.assertEqual(skill["content"], "# a\n")
+
+    def test_skill_md_counts_first_and_a_skill_reached_with_no_room_is_sent_as_skill_md_only(self):
+        a, b = _skill("a", _folder("a", 500)), _skill("b", _folder("b", 10))
+        budget = _sized(a) + len(json.dumps(a["files"]))  # a fills the budget exactly
+
+        self.assertEqual(sf.fit_folder_budget(self.result(a, b), budget=budget), (0, 1))
+
+        self.assertEqual(a["files"][0]["content"], "x" * 500)
+        self.assertNotIn("files", b)  # as before folders were sent
+        self.assertEqual(b["content"], "# b\n")
+
+    def test_a_skill_md_bigger_than_the_budget_goes_without_its_folder(self):
+        skill = _skill("a", _folder("a", 10))
+        self.assertEqual(sf.fit_folder_budget(self.result(skill), budget=_sized(skill) - 1), (0, 1))
+        self.assertNotIn("files", skill)
+
+    def test_a_binary_past_the_budget_loses_its_head_and_stays_binary(self):
+        skill = _skill("a", [{"path": "logo.png", "size": 600, "sha256": "0" * 64, "binary": True, "head": "A" * 400}])
+        sf.fit_folder_budget(self.result(skill), budget=_sized(skill) + 50)
+        self.assertEqual(skill["files"][0], {"path": "logo.png", "size": 600, "sha256": "0" * 64, "binary": True})
+
+    def test_skills_without_a_folder_are_ignored(self):
+        command = _skill("ship")
+        result = self.result(command, _skill("a", _folder("a", 50)))
+        sf.fit_folder_budget(result, budget=1)
+        self.assertNotIn("files", command)
+        self.assertEqual(command["content"], "# ship\n")
+
+    def test_the_budget_is_the_module_setting_by_default(self):
+        result = self.result(_skill("a", _folder("a", 100)))
+        with patch.object(sf, "MAX_REPORT_FOLDER_BYTES", 5):  # smaller than the SKILL.md itself
+            self.assertEqual(sf.fit_folder_budget(result), (0, 1))
+
+    def test_drop_all_folders_leaves_skill_md_only_in_every_tool(self):
+        report = {"tools": [self.result(_skill("a", _folder("a", 10)), _skill("ship")),
+                            self.result(_skill("b", _folder("b", 10)))]}
+        self.assertEqual(sf.drop_all_folders(report), 2)
+        skills = [s for t in report["tools"] for s in t["projects"][0]["skills"]]
+        self.assertEqual([("files" in s, s["content"]) for s in skills], [(False, "# a\n"), (False, "# ship\n"), (False, "# b\n")])
+
+
+class TestReportSizeBeforeUpload(unittest.TestCase):
+    """send_report_to_backend never loses a whole report to the backend's size cap over skill folders."""
+
+    def report(self, chars):
+        tool = {"name": "Claude Code", "projects": [{"path": "/w", "skills": [_skill("a", _folder("a", chars))]}]}
+        return {"device_id": "d", "tools": [tool]}
+
+    def send(self, report):
+        """Send through the real S3 path to a localhost backend; return the body the S3 PUT carried."""
+        from scripts.coding_discovery_tools import utils
+        from tests.test_claude_memory import _ReplyingBackend
+        backend = _ReplyingBackend('{"ok": true}', s3=True)
+        self.addCleanup(backend.close)
+        with patch.object(utils, "_SENTRY_DSN", ""):
+            ok, _ = utils.send_report_to_backend(backend.url, "test-key-000000", report)
+        self.assertTrue(ok)
+        self.assertEqual(len(backend.uploaded), 1)
+        return backend.uploaded[0]
+
+    def skill(self, payload):
+        return payload["tools"][0]["projects"][0]["skills"][0]
+
+    def test_a_report_under_the_limit_keeps_its_folders(self):
+        payload = self.send(self.report(1000))
+        self.assertEqual(self.skill(payload)["files"][0]["content"], "x" * 1000)
+
+    def test_a_report_over_the_limit_is_sent_without_folders(self):
+        report = self.report(5000)
+        with patch.object(sf, "MAX_REPORT_BYTES", 2000):
+            payload = self.send(report)
+        self.assertNotIn("files", self.skill(payload))  # SKILL.md only, as before folders
+        self.assertEqual(self.skill(payload)["content"], "# a\n")
+        self.assertIn("files", self.skill(report))  # the caller's report is left as it was
+
+    def test_the_hash_matches_the_report_that_is_sent(self):
+        from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
+        with patch.object(sf, "MAX_REPORT_BYTES", 2000):
+            payload = self.send(self.report(5000))
+        self.assertEqual(payload["payload_hash"], compute_payload_hash(payload["tools"][0]))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -834,16 +834,16 @@ class TestReportSizeBeforeUpload(unittest.TestCase):
         return {"device_id": "d", "tools": [tool]}
 
     def send(self, report):
+        """Send through the real S3 path to a localhost backend; return the body the S3 PUT carried."""
         from scripts.coding_discovery_tools import utils
-        sent = []
-        def upload(_url, _key, payload, **_kw):
-            sent.append(json.loads(json.dumps(payload)))
-            return True, False
-        with patch("scripts.coding_discovery_tools.s3_uploader.try_s3_upload", side_effect=upload):
-            ok, _ = utils.send_report_to_backend("http://127.0.0.1:9", "test-key-000000", report)
+        from tests.test_claude_memory import _ReplyingBackend
+        backend = _ReplyingBackend('{"ok": true}', s3=True)
+        self.addCleanup(backend.close)
+        with patch.object(utils, "_SENTRY_DSN", ""):
+            ok, _ = utils.send_report_to_backend(backend.url, "test-key-000000", report)
         self.assertTrue(ok)
-        self.assertEqual(len(sent), 1)
-        return sent[0]
+        self.assertEqual(len(backend.uploaded), 1)
+        return backend.uploaded[0]
 
     def skill(self, payload):
         return payload["tools"][0]["projects"][0]["skills"][0]

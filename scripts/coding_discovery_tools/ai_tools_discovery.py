@@ -40,6 +40,14 @@ DRAIN_BUDGET_SECONDS = 600
 RUN_SEND_RESERVE_SECONDS = 300
 # Kept clear for the best-effort work that follows the completed event.
 RUN_TAIL_GRACE_SECONDS = 30
+# The backend marks a scan failed (ScanTimeout) after 10 minutes without a
+# heartbeat, and detecting tools can take longer than that, so the run re-sends
+# in_progress on this cadence until it reports its outcome.
+SCAN_HEARTBEAT_INTERVAL_SECONDS = 120
+# What one heartbeat or skipped event may spend; neither may hold up a run.
+SCAN_EVENT_SEND_SECONDS = 10
+# setup reads the stdout line built from this to report discovery as skipped.
+SCAN_SKIPPED_REASON = "another scan is running"
 
 SCRIPT_VERSION = "1.2.0"
 
@@ -3863,6 +3871,49 @@ def _drain_budget_seconds(run_timeout: Optional[int], elapsed: float) -> float:
     return max(0.0, min(float(DRAIN_BUDGET_SECONDS), (run_timeout - elapsed) / 2))
 
 
+def _report_scan_skipped(args, sentry_ctx: Dict) -> None:
+    """Record a run the lock turned away under its own run_id, so the backend
+    sees a skipped scan rather than none. Best-effort and bounded: it never
+    changes the exit code."""
+    try:
+        device_id = DeviceIdExtractorFactory.create(platform.system()).extract_device_id()
+        send_scan_event(
+            args.domain, args.api_key, device_id, str(uuid.uuid4()), "skipped",
+            args.app_name, sentry_context=sentry_ctx, reason=SCAN_SKIPPED_REASON,
+            deadline=time.monotonic() + SCAN_EVENT_SEND_SECONDS,
+        )
+    except Exception as e:
+        logger.debug(f"Could not report the skipped scan: {e}")
+
+
+def _start_scan_heartbeat(send_in_progress: Callable[[float], object]) -> Tuple[threading.Event, threading.Thread]:
+    """Call send_in_progress(deadline) every SCAN_HEARTBEAT_INTERVAL_SECONDS on a
+    daemon thread until the returned Event is set. A failed send is ignored."""
+    stop = threading.Event()
+
+    def _beat() -> None:
+        while not stop.wait(SCAN_HEARTBEAT_INTERVAL_SECONDS):
+            try:
+                send_in_progress(time.monotonic() + SCAN_EVENT_SEND_SECONDS)
+            except Exception as e:
+                logger.debug(f"Scan heartbeat failed: {e}")
+
+    thread = threading.Thread(target=_beat, daemon=True, name="scan-heartbeat")
+    thread.start()
+    return stop, thread
+
+
+def _stop_scan_heartbeat(heartbeat: Optional[Tuple[threading.Event, threading.Thread]]) -> None:
+    """Stop the heartbeat and wait out a send already on the wire, so no
+    in_progress can reach the backend after the run's outcome."""
+    if heartbeat is None:
+        return
+    stop, thread = heartbeat
+    stop.set()
+    if thread is not threading.current_thread():
+        thread.join(timeout=SCAN_EVENT_SEND_SECONDS)
+
+
 def _windows_peak_rss_mb() -> Optional[float]:
     import ctypes
     from ctypes import wintypes
@@ -4025,11 +4076,15 @@ def main():
             step_phases[name] = phase
 
     # Acquire single-flight lock. Another discovery process running means we exit
-    # quietly — hook fire was redundant. Heartbeat thread keeps the lock mtime fresh
-    # so other hooks can detect a zombie (>STALE_LOCK_SECONDS without a tick).
+    # 0 — hook fire was redundant — after recording the skip, so the backend and
+    # setup (which reads the stdout line) can tell it from a run that never came.
+    # Heartbeat thread keeps the lock mtime fresh so other hooks can detect a
+    # zombie (>STALE_LOCK_SECONDS without a tick).
     _lock_status = discovery_cache.acquire_lock()
     if _lock_status == "contended":
         logger.info("Another discovery process is running (lock held); exiting.")
+        print(f"Scan skipped: {SCAN_SKIPPED_REASON}", flush=True)
+        _report_scan_skipped(args, sentry_ctx)
         sys.exit(0)
     _have_lock = (_lock_status == "acquired")
     # Lock is best-effort: if the state dir is unwritable, run lock-less rather than skip the scan.
@@ -4056,6 +4111,8 @@ def main():
         except Exception:
             pass
     _heartbeat_stop = None
+    # The in_progress re-sender (stop Event, thread), once the scan has started.
+    _scan_heartbeat: List = [None]
 
     # --- Self-timeout + termination cleanup (WEB-4755) ---
     # Discovery owns its deadline so it can release its lock and report the run
@@ -4090,6 +4147,7 @@ def main():
         if _cleanup_done[0]:
             return
         _cleanup_done[0] = True
+        _stop_scan_heartbeat(_scan_heartbeat[0])
         if not (device_id and run_id):
             return
         try:
@@ -4429,6 +4487,13 @@ def main():
         else:
             logger.warning("✗ Failed to send scan in_progress event (continuing scan anyway)")
         logger.info("")
+        _scan_heartbeat[0] = _start_scan_heartbeat(
+            lambda deadline: send_scan_event(
+                args.domain, args.api_key, device_id, run_id, "in_progress",
+                args.app_name, sentry_context=sentry_ctx, system_user=system_user,
+                deadline=min(deadline, send_deadline) if send_deadline is not None else deadline,
+            )
+        )
 
         # Detect all unique tools across all users first (to know which tools to process)
         logger.info("Detecting AI tools...")
@@ -5037,6 +5102,7 @@ def main():
                    if u not in unreadable_users and u not in incomplete_users]
         # The one send a run must not skip -- its manifest is what the backend
         # prunes against -- so it gets the whole budget, tail included.
+        _stop_scan_heartbeat(_scan_heartbeat[0])
         _completed_attempted[0] = True
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
@@ -5113,6 +5179,7 @@ def main():
             _heartbeat_stop.set()
         except Exception:
             pass
+        _stop_scan_heartbeat(_scan_heartbeat[0])
         if _have_lock:
             discovery_cache.release_lock()
         # Scoped to this run: a programmatic caller must not inherit the previous

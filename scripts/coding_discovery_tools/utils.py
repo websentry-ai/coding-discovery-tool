@@ -1486,16 +1486,17 @@ def send_scan_event(
     deadline: Optional[float] = None,
     failure: Optional[Dict] = None,
     response: Optional[Dict] = None,
+    reason: Optional[str] = None,
 ) -> Tuple[bool, bool]:
     """
-    Send scan lifecycle event to backend (in_progress, completed, failed).
+    Send scan lifecycle event to backend (in_progress, completed, failed, skipped).
 
     Args:
         backend_url: Backend URL to send the event to
         api_key: API key for authentication
         device_id: Device identifier
         run_id: UUID for this scan run (client-generated)
-        scan_event: Event type - "in_progress", "completed", or "failed"
+        scan_event: Event type - "in_progress", "completed", "failed" or "skipped"
         app_name: Optional application name (e.g., JumpCloud)
         home_user: Optional user context (for user-specific failures)
         scan_error: Optional error data (required when scan_event="failed")
@@ -1509,6 +1510,7 @@ def send_scan_event(
             bound the prune scope.
         failure: Optional dict, as send_report_to_backend describes it.
         response: Optional dict, as send_report_to_backend describes it.
+        reason: Optional text saying why a "skipped" run did not scan.
 
     Returns:
         Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
@@ -1518,6 +1520,9 @@ def send_scan_event(
         "run_id": run_id,
         "scan_event": scan_event,
     }
+
+    if reason:
+        payload["reason"] = reason
 
     # Differentiates a lifecycle-send failure from a per-tool one in the dedup signature.
     sentry_context = dict(sentry_context or {}, scan_event=scan_event)

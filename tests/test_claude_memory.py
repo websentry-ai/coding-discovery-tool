@@ -8,6 +8,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1268,8 +1269,15 @@ class TestMemorySecretRules(unittest.TestCase):
             found = [f for f in memory_secret_rules.find_secrets(text) if f["rule_id"] == "SECRET-021"]
             self.assertEqual(found, [], text)
         for text, value in (("password: Summer(2024)!", "Summer(2024)!"), ("password: summer(2024)!", "summer(2024)!"),
-                            ("secret: my_pass(2024)!", "my_pass(2024)!"), ("db_password=hunter2pass9", "hunter2pass9")):
+                            ("password: myPass(2024)!", "myPass(2024)!"), ("secret: my_pass(2024)!", "my_pass(2024)!"),
+                            ("db_password=hunter2pass9", "hunter2pass9")):
             self.assert_spans(text, value, "SECRET-021")
+
+    def test_assignment_rule_stays_fast_on_a_long_value(self):
+        for value in ("a" + "B1" * 50000, "aB.c" + "B1" * 50000 + "("):
+            started = time.monotonic()
+            memory_secret_rules.find_secrets("token: " + value)
+            self.assertLess(time.monotonic() - started, 1.0)
 
     def test_url_credential_rules_have_the_value_span_on_the_password(self):
         for text, value, rule_id in (

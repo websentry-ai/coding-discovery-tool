@@ -155,8 +155,9 @@ SECRET_RULES: Tuple[Tuple[str, Pattern, Tuple[Pattern, ...]], ...] = (
             + r'|(?:secret|token|api_key|apikey)' + _KEY_TAIL + r'(?=[^\s\'"]{0,200}[A-Za-z]|[^\s\'"]{20,}))'
             r'(?=[^\s\'"]{0,200}[0-9])'
             r'(?!(?:none|null|true|false|required|optional|string|changeme)(?![^\s\'"])|xxx)'
-            # A dotted or camelCase call, or one holding an empty call, is code such as getPart(1) or str(uuid4()).
-            r'(?!(?-i:[a-z_][\w.]*[.A-Z][\w.]*\(|[a-z_][\w.]*\([^\s\'"]*\(\)))'
+            # A whole dotted or camelCase call, or one holding an empty call, is code: getPart(1), str(uuid4()).
+            r'(?!(?-i:(?:[a-z_][\w.]{0,60}[.A-Z][\w.]{0,60}|[a-z_][\w.]{0,60}(?=\([\w.,()]{0,200}\(\)))'
+            r'\([\w.,()]{0,200}[`,;]{0,2}(?![^\s\'"])))'
             r'(?P<value>[^\s\'"]{8,})',
             re.IGNORECASE
         ),

@@ -152,12 +152,12 @@ SECRET_RULES: Tuple[Tuple[str, Pattern, Tuple[Pattern, ...]], ...] = (
         'SECRET-021',
         re.compile(
             r'(?:(?:password|passwd|pwd|passphrase)' + _KEY_TAIL
-            + r'|(?:secret|token|api_key|apikey)' + _KEY_TAIL + r'(?=[^\s\'"]{0,200}[A-Za-z]|[^\s\'"]{20,}))'
+            + r'|(?:secret|token|api_key|apikey)' + _KEY_TAIL + r'(?=[^\s\'"]{0,200}[A-Za-z]|[^\s\'"]{20,})'
+            # Only under a token or secret name: a whole dotted or camelCase call, or one holding (), is code.
+            r'(?!(?-i:(?:[a-z_][\w.]{0,60}[.A-Z][\w.]{0,60}|[a-z_][\w.]{0,60}(?=\([\w.,()]{0,200}\(\)))'
+            r'\([\w.,()]{0,200}[`,;]{0,2}(?![^\s\'"]))))'
             r'(?=[^\s\'"]{0,200}[0-9])'
             r'(?!(?:none|null|true|false|required|optional|string|changeme)(?![^\s\'"])|xxx)'
-            # A whole dotted or camelCase call, or one holding an empty call, is code: getPart(1), str(uuid4()).
-            r'(?!(?-i:(?:[a-z_][\w.]{0,60}[.A-Z][\w.]{0,60}|[a-z_][\w.]{0,60}(?=\([\w.,()]{0,200}\(\)))'
-            r'\([\w.,()]{0,200}[`,;]{0,2}(?![^\s\'"])))'
             r'(?P<value>[^\s\'"]{8,})',
             re.IGNORECASE
         ),

@@ -131,6 +131,7 @@ try:
     from .path_containment import owned_boundary
     from .s3_uploader import compute_payload_hash
     from .hooks_extractor import extract_hooks, hook_files_for, hooks_from_settings, root_owned
+    from .hook_policy import hook_policy_for
     from . import cache as discovery_cache
     from . import mcp_tools_cache
     from .claude_memory_helpers import collect_claude_memories, memory_scan_enabled
@@ -222,6 +223,7 @@ except ImportError:
     from scripts.coding_discovery_tools.path_containment import owned_boundary
     from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
     from scripts.coding_discovery_tools.hooks_extractor import extract_hooks, hook_files_for, hooks_from_settings, root_owned
+    from scripts.coding_discovery_tools.hook_policy import hook_policy_for
     from scripts.coding_discovery_tools import cache as discovery_cache
     from scripts.coding_discovery_tools import mcp_tools_cache
     from scripts.coding_discovery_tools.claude_memory_helpers import collect_claude_memories, memory_scan_enabled
@@ -4702,6 +4704,11 @@ def main():
                                 memories = collect_claude_memories(user_home, user_name)
                             if memories:
                                 tool_filtered["memories"] = memories
+
+                        # Whether an admin policy above ours can stop Unbound's hook (None: can't tell).
+                        hook_policy = hook_policy_for(tool_name, user_home)
+                        if hook_policy is not None:
+                            tool_filtered["hook_policy"] = hook_policy
 
                         # Generate report for this single tool with this user's data
                         # user_name is the home_user (from /Users directory)

@@ -5,7 +5,7 @@ from itertools import accumulate
 from typing import Dict, Iterator, List, Pattern, Tuple
 
 # Bump RULES_VERSION on any change; a `value` group marks the secret inside a match, none means the whole match.
-RULES_VERSION = 4
+RULES_VERSION = 5
 
 # A quoted value that is a placeholder, a shell variable or a template, not a secret.
 _PLACEHOLDER = (
@@ -155,6 +155,8 @@ SECRET_RULES: Tuple[Tuple[str, Pattern, Tuple[Pattern, ...]], ...] = (
             + r'|(?:secret|token|api_key|apikey)' + _KEY_TAIL + r'(?=[^\s\'"]{0,200}[A-Za-z]|[^\s\'"]{20,}))'
             r'(?=[^\s\'"]{0,200}[0-9])'
             r'(?!(?:none|null|true|false|required|optional|string|changeme)(?![^\s\'"])|xxx)'
+            # A lowercase name followed by "(" is a code call such as str(uuid4()), not a secret value.
+            r'(?!(?-i:[a-z_][\w.]*)\()'
             r'(?P<value>[^\s\'"]{8,})',
             re.IGNORECASE
         ),

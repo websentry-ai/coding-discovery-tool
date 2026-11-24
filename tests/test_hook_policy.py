@@ -201,6 +201,16 @@ class TestClaudeCodeHookPolicy(_FixtureMachine):
             "telemetry_enabled": None,
         })
 
+    def test_drop_ins_merge_nested_blocks_key_by_key(self):
+        # Claude Code merges managed-settings.d into managed-settings.json key by
+        # key for nested blocks such as env, so a drop-in's env adds variables.
+        self.our_managed_file({"hooks": self.hooks_running(self.our_hook_command()),
+                               "env": {"CLAUDE_CODE_ENABLE_TELEMETRY": "1"}})
+        self.write_json(self.claude_managed / "managed-settings.d" / "20-proxy.json",
+                        {"env": {"HTTPS_PROXY": "http://proxy.example.test:3128"}})
+
+        self.assertTrue(hook_policy_for("Claude Code", self.home)["telemetry_enabled"])
+
     def test_control_keys_alone_do_not_make_a_source_a_policy(self):
         self.our_managed_file()
         self.console({"managedSourcesBehavior": "merge"})

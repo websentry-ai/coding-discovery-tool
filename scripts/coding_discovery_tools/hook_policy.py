@@ -197,7 +197,8 @@ def _read_hklm_claude_settings() -> Optional[str]:
 
 
 def _claude_managed_files(managed_dir: Optional[Path]):
-    """managed-settings.json then managed-settings.d/*.json, merged key by key."""
+    """managed-settings.json then managed-settings.d/*.json in name order,
+    combined the way Claude Code does (see _merge_settings)."""
     if managed_dir is None:
         return None
     paths = [managed_dir / "managed-settings.json"]
@@ -210,9 +211,26 @@ def _claude_managed_files(managed_dir: Optional[Path]):
         if doc is _UNREADABLE:
             return _UNREADABLE
         if isinstance(doc, dict):
-            merged.update(doc)
+            merged = _merge_settings(merged, doc)
             found = True
     return merged if found else None
+
+
+def _merge_settings(base: Dict, later: Dict) -> Dict:
+    """Claude Code's drop-in rules: nested blocks (env, hooks, ...) merge key by
+    key, lists combine without duplicates, any other value is replaced by the
+    later file's. The few keys it takes whole (fallbackModel, modelPicker, ...)
+    are not read here."""
+    merged = dict(base)
+    for key, value in later.items():
+        old = merged.get(key)
+        if isinstance(old, dict) and isinstance(value, dict):
+            merged[key] = _merge_settings(old, value)
+        elif isinstance(old, list) and isinstance(value, list):
+            merged[key] = old + [item for item in value if item not in old]
+        else:
+            merged[key] = value
+    return merged
 
 
 def _runs_our_hook(doc: Dict, home: Path, managed_dir: Optional[Path]) -> bool:

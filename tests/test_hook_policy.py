@@ -238,6 +238,34 @@ class TestClaudeCodeHookPolicy(_FixtureMachine):
 
         self.assertIsNone(hook_policy_for("Claude Code", self.home))
 
+    def test_unreadable_lower_source_only_nulls_what_depends_on_it(self):
+        # The console has a policy key, so it wins whatever the broken file says.
+        self.write_json(self.claude_managed / "managed-settings.json", "{ not json")
+        self.console({"hooks": self.hooks_running(self.our_hook_command())})
+
+        self.assertEqual(hook_policy_for("Claude Code", self.home), {
+            "overriding_policy": "console",
+            "overriding_policy_has_our_hook": True,
+            "merge_sources_enabled": False,
+            "hooks_disabled": False,
+            # Unset in the console, so it could come from the file we can't read.
+            "telemetry_enabled": None,
+        })
+
+        self.console({"hooks": self.hooks_running(self.our_hook_command()),
+                      "env": {"CLAUDE_CODE_ENABLE_TELEMETRY": "1"}})
+        self.assertTrue(hook_policy_for("Claude Code", self.home)["telemetry_enabled"])
+
+    def test_unreadable_lower_source_nulls_keys_merge_would_take_from_it(self):
+        self.write_json(self.claude_managed / "managed-settings.json", "{ not json")
+        self.console({"hooks": self.hooks_running(self.our_hook_command()),
+                      "managedSourcesBehavior": "merge"})
+
+        policy = hook_policy_for("Claude Code", self.home)
+        self.assertEqual(policy["overriding_policy"], "console")
+        self.assertTrue(policy["merge_sources_enabled"])
+        self.assertIsNone(policy["hooks_disabled"])  # the file's disableAllHooks would merge in
+
     def test_windows_hklm_policy_is_mdm(self):
         with patch.object(hook_policy.platform, "system", return_value="Windows"), \
              patch.dict(hook_policy.CLAUDE_MANAGED_DIRS, {"Windows": self.claude_managed}), \

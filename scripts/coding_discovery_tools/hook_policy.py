@@ -106,59 +106,82 @@ def _claude_code_policy(home: Path) -> Dict:
     ranked = [("console", _read_json(home / ".claude" / "remote-settings.json", home)),
               ("mdm", _claude_mdm_settings(home)),
               ("file", _claude_managed_files(managed_dir))]
-    if any(doc is _UNREADABLE for _, doc in ranked):
-        return _policy()  # a source we can't read may be the one in force
-    sources = [(label, doc) for label, doc in ranked if isinstance(doc, dict)]
-    selected = next(((label, doc) for label, doc in sources if _has_policy_key(doc)), None)
-    overriding = selected if selected and selected[0] != "file" else None
-    merge = _merge_enabled(sources)
+    selected = _first(ranked, lambda label, doc: (label, doc) if _has_policy_key(doc) else None)
+    if selected is _UNKNOWN:
+        overriding = None
+    else:
+        overriding = selected if selected and selected[0] != "file" else None
+    merge = _merge_enabled(ranked)
     return _policy(
         overriding_policy=overriding[0] if overriding else None,
         overriding_policy_has_our_hook=(_runs_our_hook(overriding[1], home, managed_dir)
                                         if overriding else None),
         merge_sources_enabled=merge,
-        hooks_disabled=_claude_hooks_disabled(sources, selected, merge, home),
-        telemetry_enabled=_claude_telemetry(sources, home),
+        hooks_disabled=_claude_hooks_disabled(ranked, selected, merge, home),
+        telemetry_enabled=_claude_telemetry(ranked, home),
     )
+
+
+_UNKNOWN = object()
+
+
+def _first(ranked, pick):
+    """pick(label, doc) from the highest-ranked source where it answers (not
+    None); _UNKNOWN when a source we couldn't read comes first, since that one
+    may hold the answer. Only the keys that reach it lose their value."""
+    for label, doc in ranked:
+        if doc is _UNREADABLE:
+            return _UNKNOWN
+        if isinstance(doc, dict):
+            found = pick(label, doc)
+            if found is not None:
+                return found
+    return None
 
 
 def _has_policy_key(doc: Dict) -> bool:
     return any(key not in _CONTROL_KEYS and value is not None for key, value in doc.items())
 
 
-def _merge_enabled(sources) -> Optional[bool]:
+def _merge_enabled(ranked) -> Optional[bool]:
     """managedSourcesBehavior from the highest source carrying it or a policy key."""
-    for _, doc in sources:
-        if "managedSourcesBehavior" in doc or _has_policy_key(doc):
-            behavior = doc.get("managedSourcesBehavior", "first-wins")
-            return {"merge": True, "first-wins": False}.get(behavior)
-    return None
+    behavior = _first(ranked, lambda label, doc: doc.get("managedSourcesBehavior", "first-wins")
+                      if "managedSourcesBehavior" in doc or _has_policy_key(doc) else None)
+    return {"merge": True, "first-wins": False}.get(behavior) if isinstance(behavior, str) else None
 
 
-def _claude_hooks_disabled(sources, selected, merge: Optional[bool], home: Path) -> Optional[bool]:
+def _claude_hooks_disabled(ranked, selected, merge: Optional[bool], home: Path) -> Optional[bool]:
     """Only a managed disableAllHooks stops managed hooks; with no managed
     source the user's own settings decide. A non-boolean value is dropped."""
+    if selected is _UNKNOWN:
+        return None
     if selected is None:
         value = _read_json(home / ".claude" / "settings.json", home, follow_symlinks=True)
         return value.get("disableAllHooks") if isinstance(value, dict) and \
             isinstance(value.get("disableAllHooks"), bool) else None
+    if merge is None:
+        return None
     if merge:
-        return next((doc["disableAllHooks"] for _, doc in sources
-                     if isinstance(doc.get("disableAllHooks"), bool)), False)
+        value = _first(ranked, lambda label, doc: doc.get("disableAllHooks")
+                       if isinstance(doc.get("disableAllHooks"), bool) else None)
+        return None if value is _UNKNOWN else bool(value)
     value = selected[1].get("disableAllHooks")
     return value if isinstance(value, bool) else False
 
 
-def _claude_telemetry(sources, home: Path) -> Optional[bool]:
+def _claude_telemetry(ranked, home: Path) -> Optional[bool]:
     """CLAUDE_CODE_ENABLE_TELEMETRY: managed env merges per variable, highest
     source first, then the user's settings. Unset anywhere: the shell may still
     set it, so None."""
-    user = _read_json(home / ".claude" / "settings.json", home, follow_symlinks=True)
-    for doc in [doc for _, doc in sources] + ([user] if isinstance(user, dict) else []):
+    def pick(label, doc):
         env = doc.get("env")
         if isinstance(env, dict) and "CLAUDE_CODE_ENABLE_TELEMETRY" in env:
             return str(env["CLAUDE_CODE_ENABLE_TELEMETRY"]).strip().lower() in ("1", "true", "yes", "on")
-    return None
+        return None
+
+    user = _read_json(home / ".claude" / "settings.json", home, follow_symlinks=True)
+    value = _first(ranked + [("user", user)], pick)
+    return None if value is _UNKNOWN else value
 
 
 def _claude_mdm_settings(home: Path):

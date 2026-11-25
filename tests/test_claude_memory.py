@@ -1276,6 +1276,26 @@ class TestMemorySecretRules(unittest.TestCase):
                             ("db_password=hunter2pass9", "hunter2pass9")):
             self.assert_spans(text, value, "SECRET-021")
 
+    def test_url_credential_rules_skip_variable_references_but_keep_real_passwords(self):
+        url_rules = {"SECRET-011", "SECRET-022"}
+        for text in ("https://x-bitbucket-api-token-auth:$BITBUCKET_API_TOKEN@bitbucket.org/w/r.git",
+                     "postgres://app:$PGPASSWORD@db:5432/x", "https://u:${GITHUB_TOKEN}@github.com/o/r",
+                     "postgres://a:${{ secrets.PG }}@db/x", "postgres://a:${{ env.PG_PW }}@db/x",
+                     "https://u:${{secrets.TOKEN}}@h/x"):
+            found = [f for f in memory_secret_rules.find_secrets(text) if f["rule_id"] in url_rules]
+            self.assertEqual(found, [], text)
+        for text, value, rule_id in (("https://u:hunter2pass@h", "hunter2pass", "SECRET-022"),
+                                     ("https://u:$ecretPass1@h", "$ecretPass1", "SECRET-022"),
+                                     ("postgres://app:hunter2pass@db/x", "hunter2pass", "SECRET-011"),
+                                     ("https://u:$TOKENx1@h", "$TOKENx1", "SECRET-022"),
+                                     ("postgres://u:${PG_PASS:-hunter2real}@db/x", "${PG_PASS:-hunter2real}",
+                                      "SECRET-011"),
+                                     ("https://u:${TOKEN:-s3cr3tDefault}@h", "${TOKEN:-s3cr3tDefault}", "SECRET-022"),
+                                     ("https://u:$(pass)@h/x", "$(pass)", "SECRET-022"),
+                                     ("postgres://app:$(echo hunter2real)@db/x", "$(echo hunter2real)", "SECRET-011"),
+                                     ("postgres://a:${{ 'hunter2real' }}@db/x", "${{ 'hunter2real' }}", "SECRET-011")):
+            self.assert_spans(text, value, rule_id)
+
     def test_assignment_rule_stays_fast_on_a_long_value(self):
         for value in ("a" + "B1" * 50000, "aB.c" + "B1" * 50000 + "("):
             started = time.monotonic()

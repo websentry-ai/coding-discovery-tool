@@ -244,6 +244,15 @@ _METRIC_NAME_ILLEGAL = re.compile(r"[^a-zA-Z0-9_.\-]")
 _ROUTING_ALIASES = {"devin desktop": "windsurf"}
 
 
+def _assign_detector_group(detector, tool_info) -> None:
+    """Apply the registered group while preserving explicit results from multi-product detectors."""
+    group_id = getattr(detector, "agent_group_id", None)
+    if not isinstance(group_id, str) or not tool_info:
+        return
+    for result in tool_info if isinstance(tool_info, list) else [tool_info]:
+        result.setdefault("agent_group_id", group_id)
+
+
 def _routing_name(tool) -> str:
     """The lowercased name the artifact branches switch on."""
     name = (tool.get("name") or "").lower()
@@ -855,11 +864,8 @@ class AIToolsDetector:
                 
                 if tool_info:
                     _fill_version_from_install_path(tool_info, user_home or Path.home())
-                    # Handle detectors that return a list (like JetBrains)
-                    if isinstance(tool_info, list):
-                        tools.extend(tool_info)
-                    else:
-                        tools.append(tool_info)
+                    _assign_detector_group(detector, tool_info)
+                    tools.extend(tool_info if isinstance(tool_info, list) else [tool_info])
             except Exception as e:
                 # exc_info keeps the traceback on the machine even when no alert is sent.
                 logger.warning(
@@ -889,7 +895,9 @@ class AIToolsDetector:
         """
         for detector in self._tool_detectors:
             if detector.tool_name.lower() == tool_name.lower():
-                return detector.detect()
+                tool_info = detector.detect()
+                _assign_detector_group(detector, tool_info)
+                return tool_info
         
         logger.warning(f"No detector found for tool: {tool_name}")
         return None
@@ -3019,6 +3027,8 @@ class AIToolsDetector:
         one chokepoint that every tool routes through."""
         result = self._process_single_tool_raw(tool)
         if isinstance(result, dict):
+            if "agent_group_id" in tool:
+                result["agent_group_id"] = tool["agent_group_id"]
             # Decode first so hooks, found by on-disk path, join the existing project rows.
             _normalize_encoded_paths(result)
             self._merge_hooks_into_projects(tool, result)

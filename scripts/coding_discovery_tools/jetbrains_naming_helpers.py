@@ -9,6 +9,7 @@ and windows/ detectors and drifted; they live here so all three agree.
 import logging
 import re
 import xml.etree.ElementTree as ET
+from hashlib import sha256
 from pathlib import Path
 from types import MappingProxyType
 from typing import Dict, FrozenSet, Iterable, List, Mapping, Optional, Tuple
@@ -127,6 +128,17 @@ def parse_ide_name_and_version(folder_name: str, mapping: Mapping[str, str]) -> 
         return match.group(1).rstrip(" ._-"), match.group(2)
 
     return folder_name, "Unknown"
+
+
+def jetbrains_agent_group_id(folder_name: str) -> str:
+    """Use the stable config product code so display name and version changes preserve identity."""
+    product_code, _ = parse_ide_name_and_version(folder_name, {})
+    if product_code == "AndroidStudio":
+        return "android-studio"
+    normalized = re.sub(r"[^a-z0-9]+", "-", product_code.lower()).strip("-")
+    if not normalized or len(normalized) > 90:
+        normalized = sha256(product_code.encode()).hexdigest()
+    return f"jetbrains-{normalized}"
 
 
 def plugin_entries(ide: Mapping) -> List[Dict[str, Optional[str]]]:

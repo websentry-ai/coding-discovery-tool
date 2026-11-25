@@ -179,3 +179,6 @@ def scan_dir_entries(directory):
     with os.scandir(directory) as it:
         for entry in it:
             yield entry
+
+
+GITHUB_COPILOT_GROUP_ID = "github-copilot"

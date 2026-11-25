@@ -8,7 +8,6 @@ based on the operating system.
 import platform
 from typing import Optional
 
-# Base classes
 from .coding_tool_base import (
     BaseDeviceIdExtractor,
     BaseToolDetector,
@@ -53,6 +52,8 @@ from .coding_tool_base import (
     BaseReplitSkillsExtractor,
     BaseWindsurfSkillsExtractor,
 )
+from .constants import GITHUB_COPILOT_GROUP_ID
+
 
 class DeviceIdExtractorFactory:
     """Factory for creating OS-specific device ID extractors."""
@@ -777,133 +778,45 @@ class ToolDetectorFactory:
         if os_name is None:
             os_name = platform.system()
 
-        detectors = [
-            ToolDetectorFactory.create_cursor_detector(os_name),
-            ToolDetectorFactory.create_claude_detector(os_name),
-            ToolDetectorFactory.create_windsurf_detector(os_name),
-            ToolDetectorFactory.create_roo_detector(os_name),
-        ]
-
-        # Add Claude Cowork detector for macOS, Windows, and Linux
-        claude_cowork_detector = ToolDetectorFactory.create_claude_cowork_detector(os_name)
-        if claude_cowork_detector is not None:
-            detectors.append(claude_cowork_detector)
-
-        # Add Claude Desktop detector for macOS and Windows
-        claude_desktop_detector = ToolDetectorFactory.create_claude_desktop_detector(os_name)
-        if claude_desktop_detector is not None:
-            detectors.append(claude_desktop_detector)
-        
-        # Add Xcode coding intelligence detector for macOS
-        xcode_detector = ToolDetectorFactory.create_xcode_detector(os_name)
-        if xcode_detector is not None:
-            detectors.append(xcode_detector)
-
-        copilot_xcode_detector = ToolDetectorFactory.create_copilot_xcode_detector(os_name)
-        if copilot_xcode_detector is not None:
-            detectors.append(copilot_xcode_detector)
-
-        # Add Cline detector for macOS and Windows
-        cline_detector = ToolDetectorFactory.create_cline_detector(os_name)
-        if cline_detector is not None:
-            detectors.append(cline_detector)
-        
-        # Add Antigravity detector for both macOS and Windows
-        antigravity_detector = ToolDetectorFactory.create_antigravity_detector(os_name)
-        if antigravity_detector is not None:
-            detectors.append(antigravity_detector)
-        
-        # Add Kilo Code detector for macOS and Windows
-        kilocode_detector = ToolDetectorFactory.create_kilocode_detector(os_name)
-        if kilocode_detector is not None:
-            detectors.append(kilocode_detector)
-        
-        # Add Gemini CLI detector for macOS and Windows
-        gemini_cli_detector = ToolDetectorFactory.create_gemini_cli_detector(os_name)
-        if gemini_cli_detector is not None:
-            detectors.append(gemini_cli_detector)
-
-        # Add Cursor CLI detector for macOS and Windows
-        cursor_cli_detector = ToolDetectorFactory.create_cursor_cli_detector(os_name)
-        if cursor_cli_detector is not None:
-            detectors.append(cursor_cli_detector)
-
-        # Add Codex detector for macOS
-        codex_detector = ToolDetectorFactory.create_codex_detector(os_name)
-        if codex_detector is not None:
-            detectors.append(codex_detector)
-        
-        # Add Replit detector for macOS
-        replit_detector = ToolDetectorFactory.create_replit_detector(os_name)
-        if replit_detector is not None:
-            detectors.append(replit_detector)
-        # Add OpenCode detector for macOS
-        opencode_detector = ToolDetectorFactory.create_opencode_detector(os_name)
-        if opencode_detector is not None:
-            detectors.append(opencode_detector)
-
-        # Add pi coding agent detector (macOS + Linux)
-        pi_detector = ToolDetectorFactory.create_pi_detector(os_name)
-        if pi_detector is not None:
-            detectors.append(pi_detector)
-
-        # Add Zed detector (macOS + Linux)
-        zed_detector = ToolDetectorFactory.create_zed_detector(os_name)
-        if zed_detector is not None:
-            detectors.append(zed_detector)
-
-        # Add Grok Bot detector (macOS)
-        grok_bot_detector = ToolDetectorFactory.create_grok_bot_detector(os_name)
-        if grok_bot_detector is not None:
-            detectors.append(grok_bot_detector)
-
-        # Add Muse and Muse Code detectors (macOS)
-        muse_detector = ToolDetectorFactory.create_muse_detector(os_name)
-        if muse_detector is not None:
-            detectors.append(muse_detector)
-
-        muse_code_detector = ToolDetectorFactory.create_muse_code_detector(os_name)
-        if muse_code_detector is not None:
-            detectors.append(muse_code_detector)
-
-        openclaw_detector = ToolDetectorFactory.create_openclaw_detector(os_name)
-        if openclaw_detector is not None:
-            detectors.append(openclaw_detector)
-
-        copilot_detector = ToolDetectorFactory.create_copilot_detector(os_name)
-        if copilot_detector is not None:
-            detectors.append(copilot_detector)
-
-        # Add GitHub Copilot CLI detector (macOS + Windows)
-        copilot_cli_detector = ToolDetectorFactory.create_copilot_cli_detector(os_name)
-        if copilot_cli_detector is not None:
-            detectors.append(copilot_cli_detector)
-
-        copilot_app_detector = ToolDetectorFactory.create_copilot_app_detector(os_name)
-        if copilot_app_detector is not None:
-            detectors.append(copilot_app_detector)
-
-        # Visual Studio + its bundled Copilot component (Windows only)
-        visual_studio_detector = ToolDetectorFactory.create_visual_studio_detector(os_name)
-        if visual_studio_detector is not None:
-            detectors.append(visual_studio_detector)
-
-        # Add Augment Code detector (macOS + Windows + Linux)
-        augment_detector = ToolDetectorFactory.create_augment_detector(os_name)
-        if augment_detector is not None:
-            detectors.append(augment_detector)
-
-        # Add JetBrains detector for macOS
-        jetbrains_detector = ToolDetectorFactory.create_jetbrains_detector(os_name)
-        if jetbrains_detector is not None:
-            detectors.append(jetbrains_detector)
-
-        junie_detector = ToolDetectorFactory.create_junie_detector(os_name)
-        if junie_detector is not None:
-            detectors.append(junie_detector)
-
-        # Filter out None values
-        return [detector for detector in detectors if detector is not None]
+        # A detector for multiple products sets the group on each result.
+        registrations = (
+            ("cursor", ToolDetectorFactory.create_cursor_detector),
+            ("claude-code", ToolDetectorFactory.create_claude_detector),
+            ("devin-desktop", ToolDetectorFactory.create_windsurf_detector),
+            ("roo-code", ToolDetectorFactory.create_roo_detector),
+            ("claude-cowork", ToolDetectorFactory.create_claude_cowork_detector),
+            ("claude-desktop", ToolDetectorFactory.create_claude_desktop_detector),
+            ("xcode-coding-intelligence", ToolDetectorFactory.create_xcode_detector),
+            (GITHUB_COPILOT_GROUP_ID, ToolDetectorFactory.create_copilot_xcode_detector),
+            ("cline", ToolDetectorFactory.create_cline_detector),
+            ("antigravity", ToolDetectorFactory.create_antigravity_detector),
+            ("kilo-code", ToolDetectorFactory.create_kilocode_detector),
+            ("gemini-cli", ToolDetectorFactory.create_gemini_cli_detector),
+            ("cursor", ToolDetectorFactory.create_cursor_cli_detector),
+            ("codex", ToolDetectorFactory.create_codex_detector),
+            ("replit", ToolDetectorFactory.create_replit_detector),
+            ("opencode", ToolDetectorFactory.create_opencode_detector),
+            ("pi-coding-agent", ToolDetectorFactory.create_pi_detector),
+            ("zed", ToolDetectorFactory.create_zed_detector),
+            ("grok-bot", ToolDetectorFactory.create_grok_bot_detector),
+            ("muse", ToolDetectorFactory.create_muse_detector),
+            ("muse-code", ToolDetectorFactory.create_muse_code_detector),
+            ("openclaw", ToolDetectorFactory.create_openclaw_detector),
+            (GITHUB_COPILOT_GROUP_ID, ToolDetectorFactory.create_copilot_detector),
+            (GITHUB_COPILOT_GROUP_ID, ToolDetectorFactory.create_copilot_cli_detector),
+            (GITHUB_COPILOT_GROUP_ID, ToolDetectorFactory.create_copilot_app_detector),
+            ("visual-studio", ToolDetectorFactory.create_visual_studio_detector),
+            ("augment-code", ToolDetectorFactory.create_augment_detector),
+            (None, ToolDetectorFactory.create_jetbrains_detector),
+            ("junie", ToolDetectorFactory.create_junie_detector),
+        )
+        detectors = []
+        for group_id, create_detector in registrations:
+            detector = create_detector(os_name)
+            if detector is not None:
+                detector.agent_group_id = group_id
+                detectors.append(detector)
+        return detectors
 
 
 class CursorRulesExtractorFactory:

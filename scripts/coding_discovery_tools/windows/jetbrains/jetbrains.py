@@ -13,6 +13,7 @@ from ...jetbrains_naming_helpers import (
     JETBRAINS_IDE_NAME_MAPPING,
     JETBRAINS_SKIP_FOLDERS,
     detect_plan,
+    jetbrains_agent_group_id,
     jetbrains_config_roots,
     looks_like_ide_folder,
     parse_ide_name_and_version,
@@ -85,6 +86,7 @@ class WindowsJetBrainsDetector(BaseToolDetector):
         for ide in detected_ides:
             tool_info = {
                 "name": ide['display_name'],
+                "agent_group_id": jetbrains_agent_group_id(ide["folder_name"]),
                 "version": ide['version'],
                 "plan": ide['plan'],
                 "install_path": ide['config_path'],

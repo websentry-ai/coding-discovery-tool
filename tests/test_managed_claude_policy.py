@@ -150,8 +150,9 @@ class LinuxReadsTheOrganizationSettingsAndRules(_ManagedPolicyCase):
         self._write_json(self.homes["alice"] / ".claude" / "settings.json", {"permissions": {"allow": ["Bash(ls)"]}})
         alice = self._report_for("alice", {}).get("permissions") or {}
         bob = self._report_for("bob", {}).get("permissions") or {}
-        self.assertIn(self.homes["alice"].as_posix(), json.dumps(alice), "alice's own settings were lost")
-        self.assertNotIn(self.homes["alice"].as_posix(), json.dumps(bob), "alice's settings leaked into bob's report")
+        self.assertIn("Bash(ls)", alice.get("allow_rules") or [], "alice's own settings were lost")
+        self.assertNotIn("Bash(ls)", bob.get("allow_rules") or [], "alice's settings leaked into bob's report")
+        self.assertIn("WebFetch", bob.get("deny_rules") or [], "the organization settings did not reach bob")
 
     def test_broken_settings_json_is_survived(self):
         (self.etc / "managed-settings.json").write_text('{"permissions": ', encoding="utf-8")
@@ -166,6 +167,17 @@ class LinuxReadsTheOrganizationSettingsAndRules(_ManagedPolicyCase):
                 reported = [r for p in self._report_for(user, {}).get("projects", [])
                             for r in p.get("rules", []) if r.get("scope") == "managed"]
                 self.assertEqual(len(reported), 1, "the organization rules did not reach this user")
+
+    def test_organization_rules_reach_users_without_rules_of_their_own(self):
+        """One user's personal rules must not narrow the organization rules down to that user."""
+        (self.etc / "CLAUDE.md").write_text("Org rules.\n", encoding="utf-8")
+        (self.homes["alice"] / ".claude").mkdir(parents=True)
+        (self.homes["alice"] / ".claude" / "CLAUDE.md").write_text("alice's rules\n", encoding="utf-8")
+        for user in USERS:
+            with self.subTest(user=user):
+                reported = [r for p in self._report_for(user, {}).get("projects", [])
+                            for r in p.get("rules", []) if r.get("scope") == "managed"]
+                self.assertEqual(len(reported), 1, "the organization rules did not reach this user exactly once")
 
     def test_no_claude_md_reports_no_managed_rules(self):
         self.assertEqual(LinuxClaudeRulesExtractor().extract_all_claude_rules()["managed_rules"], [])

@@ -2050,25 +2050,29 @@ class AIToolsDetector:
                 # Add managed rules to every discovered user home
                 if managed_rules:
                     logger.info(f"  ✓ Found {len(managed_rules)} managed rule(s)")
-                    user_homes = set()
+                    user_homes: Dict[str, str] = {}  # normalised home -> first spelling seen
+
+                    def add_home(home: str) -> None:
+                        key = _normalise_path(home)
+                        user_homes.setdefault(key.lower() if self.system == "Windows" else key, home)
+
                     for rule in user_rules:
                         if rule.get("project_path"):
-                            user_homes.add(rule["project_path"])
+                            add_home(rule["project_path"])
+                    # Every account, not only those with rules of their own: the policy applies to all.
+                    if self.system == "Darwin":
+                        for username in get_all_users_macos():
+                            add_home(str(Path("/Users") / username))
+                    elif self.system == "Windows":
+                        for home in windows_user_homes().values():
+                            add_home(str(home))
+                    elif self.system == "Linux":
+                        for username in get_all_users_linux():
+                            # `root` user's home is /root, not /home/root.
+                            add_home(str(linux_home_for_user(username)))
                     if not user_homes:
-                        if self.system == "Darwin":
-                            for username in get_all_users_macos():
-                                user_homes.add(str(Path("/Users") / username))
-                        elif self.system == "Windows":
-                            for home in windows_user_homes().values():
-                                user_homes.add(str(home))
-                        elif self.system == "Linux":
-                            for username in get_all_users_linux():
-                                # `root` user's home is /root, not /home/root.
-                                home = linux_home_for_user(username)
-                                user_homes.add(str(home))
-                    if not user_homes:
-                        user_homes.add(str(Path.home()))
-                    for user_home in user_homes:
+                        add_home(str(Path.home()))
+                    for user_home in user_homes.values():
                         if user_home not in projects_dict:
                             projects_dict[user_home] = {
                                 "path": user_home,

@@ -12,8 +12,10 @@ _PLACEHOLDER = (
     r'(?![<{])(?!\$[({]|\$(?-i:[A-Z_][A-Z0-9_]*)["\'])(?![*xX]+["\'])'
     r'(?!(?:changeme|password|example|placeholder|redacted)["\'])(?!your[_-][^\'"\s]*["\'])'
 )
-# A URL password that is a shell/CI variable reference ($VAR, ${VAR}, ${{ ctx }}, $(cmd)), not a secret.
-_URL_VAR_PASSWORD = r'(?!\$[A-Z_][A-Z0-9_]*@|\$\{[^@\n]{1,100}\}@|\$\()'
+# A URL password that is a bare variable reference ($VAR, ${VAR}, ${{ ctx }}, $(cmd)), not a secret; ${VAR:-literal} stays flagged.
+_URL_VAR_PASSWORD = (
+    r'(?!\$[A-Z_][A-Z0-9_]*@|\$\{(?:\{[^@\n}]{1,100}\}|[A-Za-z_][A-Za-z0-9_]{0,99})\}@|\$\([^@\n]{1,100}\)@)'
+)
 # A key that names a setting about the secret (its name, URL, TTL...) rather than holding it.
 _DESCRIPTOR_KEY = (
     r'(?![A-Za-z0-9_.-]{0,20}?(?:[_.-]|(?-i:(?<=[a-z0-9])(?=[A-Z])))'

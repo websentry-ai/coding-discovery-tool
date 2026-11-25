@@ -1280,13 +1280,17 @@ class TestMemorySecretRules(unittest.TestCase):
         url_rules = {"SECRET-011", "SECRET-022"}
         for text in ("https://x-bitbucket-api-token-auth:$BITBUCKET_API_TOKEN@bitbucket.org/w/r.git",
                      "postgres://app:$PGPASSWORD@db:5432/x", "https://u:${GITHUB_TOKEN}@github.com/o/r",
-                     "https://u:${{ secrets.TOKEN }}@h/x", "https://u:$(cat ~/.pw)@h"):
+                     "postgres://a:${{ secrets.PG }}@db/x", "postgres://a:$(cat /run/pw)@db/x",
+                     "https://u:${{secrets.TOKEN}}@h/x", "https://u:$(pass)@h/x"):
             found = [f for f in memory_secret_rules.find_secrets(text) if f["rule_id"] in url_rules]
             self.assertEqual(found, [], text)
         for text, value, rule_id in (("https://u:hunter2pass@h", "hunter2pass", "SECRET-022"),
                                      ("https://u:$ecretPass1@h", "$ecretPass1", "SECRET-022"),
                                      ("postgres://app:hunter2pass@db/x", "hunter2pass", "SECRET-011"),
-                                     ("https://u:$TOKENx1@h", "$TOKENx1", "SECRET-022")):
+                                     ("https://u:$TOKENx1@h", "$TOKENx1", "SECRET-022"),
+                                     ("postgres://u:${PG_PASS:-hunter2real}@db/x", "${PG_PASS:-hunter2real}", "SECRET-011"),
+                                     ("https://u:${TOKEN:-s3cr3tDefault}@h", "${TOKEN:-s3cr3tDefault}", "SECRET-022"),
+                                     ("https://u:$(xY9!q@h", "$(xY9!q", "SECRET-022")):
             self.assert_spans(text, value, rule_id)
 
     def test_assignment_rule_stays_fast_on_a_long_value(self):

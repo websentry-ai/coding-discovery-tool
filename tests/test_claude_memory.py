@@ -1288,7 +1288,8 @@ class TestMemorySecretRules(unittest.TestCase):
                                      ("https://u:$ecretPass1@h", "$ecretPass1", "SECRET-022"),
                                      ("postgres://app:hunter2pass@db/x", "hunter2pass", "SECRET-011"),
                                      ("https://u:$TOKENx1@h", "$TOKENx1", "SECRET-022"),
-                                     ("postgres://u:${PG_PASS:-hunter2real}@db/x", "${PG_PASS:-hunter2real}", "SECRET-011"),
+                                     ("postgres://u:${PG_PASS:-hunter2real}@db/x", "${PG_PASS:-hunter2real}",
+                                      "SECRET-011"),
                                      ("https://u:${TOKEN:-s3cr3tDefault}@h", "${TOKEN:-s3cr3tDefault}", "SECRET-022"),
                                      ("https://u:$(xY9!q@h", "$(xY9!q", "SECRET-022")):
             self.assert_spans(text, value, rule_id)

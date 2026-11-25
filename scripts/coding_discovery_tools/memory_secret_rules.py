@@ -12,7 +12,7 @@ _PLACEHOLDER = (
     r'(?![<{])(?!\$[({]|\$(?-i:[A-Z_][A-Z0-9_]*)["\'])(?![*xX]+["\'])'
     r'(?!(?:changeme|password|example|placeholder|redacted)["\'])(?!your[_-][^\'"\s]*["\'])'
 )
-# A URL password that is a bare variable reference ($VAR, ${VAR}, ${{ ctx }}, $(cmd)), not a secret; ${VAR:-literal} stays flagged.
+# A URL password that is a bare variable reference ($VAR, ${VAR}, ${{ ctx }}, $(cmd)) is not a secret.
 _URL_VAR_PASSWORD = (
     r'(?!\$[A-Z_][A-Z0-9_]*@|\$\{(?:\{[^@\n}]{1,100}\}|[A-Za-z_][A-Za-z0-9_]{0,99})\}@|\$\([^@\n]{1,100}\)@)'
 )

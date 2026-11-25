@@ -538,7 +538,11 @@ def _has_user_owned_data(tool_name: str, tool_filtered: Dict, user_home) -> bool
     if _has_owned_projects(tool_filtered, user_home):
         return True
     perms = tool_filtered.get("permissions")
-    return perms is not None and perms.get("settings_source") != "managed"
+    if perms is None:
+        return False
+    # A merged record is labelled managed once company settings exist; the user's own file still counts.
+    return perms.get("settings_source") != "managed" or any(
+        _under_home(path, user_home) for path in perms.get("contributing_paths") or [])
 
 
 def _decode_project_path(path):

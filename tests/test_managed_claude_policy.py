@@ -195,6 +195,18 @@ class OrganizationPolicyAloneDoesNotMakeAUser(_ManagedPolicyCase):
         (self.etc / "CLAUDE.md").write_text("Org rules.\n", encoding="utf-8")
         self.assertIsNone(self._disowned_report("bob"), "organization policy alone created a row for this user")
 
+    def test_a_users_own_settings_still_give_a_row_under_company_settings(self):
+        """The merged record is labelled managed, but bob's own settings file is still his data."""
+        self._write_json(self.etc / "managed-settings.json", {"permissions": {"deny": ["WebFetch"]}})
+        self._write_json(self.homes["bob"] / ".claude" / "settings.json", {"permissions": {"allow": ["Bash(ls)"]}})
+        report = self._disowned_report("bob")
+        self.assertIsNotNone(report, "company settings made a user with their own settings lose their row")
+        self.assertIn("Bash(ls)", (report.get("permissions") or {}).get("allow_rules") or [])
+
+    def test_company_settings_alone_give_no_row(self):
+        self._write_json(self.etc / "managed-settings.json", {"permissions": {"deny": ["WebFetch"]}})
+        self.assertIsNone(self._disowned_report("bob"), "company settings alone created a row for this user")
+
     def test_a_users_own_rule_still_gives_a_row(self):
         self._write_json(self.managed_mcp, {"mcpServers": {"corp-gateway": {"command": "corp-mcp"}}})
         (self.homes["bob"] / ".claude").mkdir(parents=True)

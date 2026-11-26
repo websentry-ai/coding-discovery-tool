@@ -58,6 +58,7 @@ class _FixtureMachine(unittest.TestCase):
         self.our_script = self.claude_managed / "hooks" / "unbound.py"
         self.our_script.parent.mkdir()
         self.our_script.write_text("#!/usr/bin/env python3\n")
+        self.our_script.chmod(0o755)  # as setup installs it
         self.unbound_root = self.root / "opt" / "unbound"
         self.our_binary = self.unbound_root / "current" / "unbound-hook" / "unbound-hook"
         self.our_binary.parent.mkdir(parents=True)
@@ -131,6 +132,16 @@ class TestClaudeCodeHookPolicy(_FixtureMachine):
 
         self.assertTrue(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"])
 
+    @unittest.skipIf(os.name == "nt", "Windows has no execute bit")
+    def test_a_directly_run_script_without_its_execute_bit_is_not_a_working_hook(self):
+        self.our_script.chmod(0o644)
+        self.console({"hooks": self.hooks_running(self.our_hook_command())})
+        self.assertFalse(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"])
+
+        # Through an interpreter the bit is not needed.
+        self.console({"hooks": self.hooks_running(f'python3 "{self.our_script}"')})
+        self.assertTrue(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"])
+
     def test_our_script_only_named_as_an_argument_is_not_our_hook(self):
         self.console({"hooks": self.hooks_running(f'/usr/bin/cat "{self.our_script}"')})
 
@@ -141,6 +152,7 @@ class TestClaudeCodeHookPolicy(_FixtureMachine):
         user_script = self.home / ".claude" / "hooks" / "unbound.py"
         user_script.parent.mkdir()
         user_script.write_text("#!/usr/bin/env python3\n")
+        user_script.chmod(0o755)  # as setup installs it
         for command in ('"$HOME/.claude/hooks/unbound.py"', "${HOME}/.claude/hooks/unbound.py",
                         "~/.claude/hooks/unbound.py",
                         'if [ -f "$HOME/.claude/hooks/unbound.py" ]; then exec "$HOME/.claude/hooks/unbound.py"; fi'):

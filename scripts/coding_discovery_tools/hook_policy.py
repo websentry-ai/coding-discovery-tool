@@ -305,7 +305,11 @@ def _segment_runs(words: List[str], wanted: set, home: Path) -> bool:
     program = _program_path(" ".join(words), None, None, home)
     if program is None:
         return False
-    return os.path.normcase(os.path.normpath(str(program))) in wanted or _is_unbound_binary(program)
+    if os.path.normcase(os.path.normpath(str(program))) not in wanted:
+        return _is_unbound_binary(program)
+    # Run as the program itself (no interpreter in front), the script needs its execute bit to start.
+    run_directly = _program_path(words[0], None, None, home) == program
+    return not (run_directly and os.name != "nt" and not os.access(str(program), os.X_OK))
 
 
 def _is_unbound_binary(program: Path) -> bool:

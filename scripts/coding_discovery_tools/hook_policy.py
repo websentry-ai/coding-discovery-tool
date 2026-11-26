@@ -360,6 +360,9 @@ def _decode_base64(value):
 _FEATURES_TABLE = re.compile(r"^\s*\[\s*features\s*\]\s*(#.*)?$")
 _ANY_TABLE = re.compile(r"^\s*\[")
 _FEATURE_FLAG = re.compile(r"^\s*(hooks|codex_hooks)\s*=\s*(true|false)\s*(#.*)?$")
+_DOTTED_FLAG = re.compile(r"^\s*features\s*\.\s*(hooks|codex_hooks)\s*=\s*(true|false)\s*(#.*)?$")
+_INLINE_FEATURES = re.compile(r"^\s*features\s*=\s*\{([^{}]*)\}\s*(#.*)?$")
+_INLINE_FLAG = re.compile(r"(?:^|,)\s*(hooks|codex_hooks)\s*=\s*(true|false)\s*(?=,|$)")
 
 
 def _toml_hooks_feature(text: str):
@@ -381,17 +384,24 @@ def _toml_hooks_feature(text: str):
 
 
 def _toml_hooks_feature_by_line(text: str):
-    """Python < 3.11 has no tomllib: read just the [features] table's flag lines."""
-    in_features, found = False, {}
+    """Python < 3.11 has no tomllib: read the features flags from a [features] table, or from
+    root-level ``features.hooks = ...`` and ``features = { hooks = ... }`` lines."""
+    in_root, in_features, found = True, False, {}
     for line in text.splitlines():
         if _ANY_TABLE.match(line):
             header = line.split("#", 1)[0]
             if header.count("[") != header.count("]"):
                 return _UNREADABLE
-            in_features = bool(_FEATURES_TABLE.match(line))
+            in_root, in_features = False, bool(_FEATURES_TABLE.match(line))
             continue
-        match = _FEATURE_FLAG.match(line) if in_features else None
-        if match:
+        if in_features:
+            pairs = [_FEATURE_FLAG.match(line)]
+        elif in_root:
+            inline = _INLINE_FEATURES.match(line)
+            pairs = list(_INLINE_FLAG.finditer(inline.group(1))) if inline else [_DOTTED_FLAG.match(line)]
+        else:
+            pairs = []
+        for match in filter(None, pairs):
             found[match.group(1)] = match.group(2) == "true"
     return found.get("hooks", found.get("codex_hooks"))
 

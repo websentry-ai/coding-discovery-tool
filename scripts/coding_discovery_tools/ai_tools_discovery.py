@@ -3897,6 +3897,8 @@ def _start_scan_heartbeat(send_in_progress: Callable[[float], object]) -> Tuple[
         # A failed beat is only logged: report_to_sentry is not thread-safe.
         silence_sentry_on_this_thread()
         while not stop.wait(SCAN_HEARTBEAT_INTERVAL_SECONDS):
+            if stop.is_set():  # the scan ended as this wait timed out: its outcome must be the last event
+                break
             try:
                 send_in_progress(time.monotonic() + SCAN_EVENT_SEND_SECONDS)
             except Exception as e:

@@ -179,6 +179,21 @@ class TestScanHeartbeats(unittest.TestCase):
         self.assertEqual([e["event"] for e in self.events][-1], "completed")
         self._assert_heartbeat_stopped()
 
+    def test_a_stop_that_arrives_as_the_wait_ends_sends_no_heartbeat(self):
+        sends = []
+
+        class StopsAsTheWaitEnds(threading.Event):
+            def wait(self, timeout=None):
+                self.set()  # the scan ends just after this beat's wait timed out
+                return False
+
+        with patch.object(self.adm, "threading", Mock(Event=StopsAsTheWaitEnds, Thread=threading.Thread)):
+            _, thread = self.adm._start_scan_heartbeat(sends.append)
+            thread.join(2)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(sends, [])
+
     def test_crashed_scan_stops_heartbeats_before_reporting_failed(self):
         def detect_then_crash(*args, **kwargs):
             time.sleep(0.3)

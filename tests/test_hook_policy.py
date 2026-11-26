@@ -28,6 +28,15 @@ import scripts.coding_discovery_tools.hook_policy as hook_policy
 import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.hook_policy import hook_policy_for
 
+
+def _platform_reporting(system: str):
+    """The real platform module with system() faked, for patching one module's ``platform`` name only."""
+    import platform as real
+    fake = type(real)("platform")
+    fake.__dict__.update({k: v for k, v in vars(real).items() if not k.startswith("__")})
+    fake.system = lambda: system
+    return fake
+
 ALL_NULL_KEYS = ("overriding_policy", "overriding_policy_has_our_hook",
                  "merge_sources_enabled", "hooks_disabled", "telemetry_enabled")
 
@@ -312,6 +321,22 @@ class TestCodexHookPolicy(_FixtureMachine):
             self.config(text)
             self.assertTrue(hook_policy_for("Codex", self.home)["hooks_disabled"], text)
 
+    def test_dotted_and_inline_features_keys_are_read_by_both_parsers(self):
+        cases = {
+            'model = "gpt-5"\nfeatures.hooks = false\n': False,
+            "features.codex_hooks = false  # old name\n": False,
+            "features = { hooks = false, web_search = true }\n": False,
+            "features = { web_search = true, codex_hooks = true }  # on\n": True,
+            # Under another table the same text names a different key, so it decides nothing.
+            "[profile]\nfeatures.hooks = false\n": None,
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertIs(hook_policy._toml_hooks_feature_by_line(text), expected)
+                self.config(text)
+                policy = hook_policy_for("Codex", self.home)
+                self.assertIs(policy["hooks_disabled"], expected is False)
+
     def test_broken_config_fails_open(self):
         self.config("[features\nhooks = false\n")
 
@@ -364,7 +389,7 @@ class _DiscoveryRun(_FixtureMachine):
         sent = Mock(return_value=(True, False))
         argv = ["ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1"]
         patches = [
-            patch.object(adm.platform, "system", return_value="Darwin"),
+            patch.object(adm, "platform", _platform_reporting("Darwin")),  # this module only
             patch.object(adm.discovery_cache, "acquire_lock", return_value="acquired"),
             patch.object(adm.discovery_cache, "heartbeat_start", Mock(return_value=threading.Event())),
             patch.object(adm.discovery_cache, "release_lock", Mock()),
@@ -536,6 +561,7 @@ class TestHostileFiles(_FixtureMachine):
                 finally:
                     path.unlink()
 
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "no FIFOs on this OS")
     def test_a_fifo_in_place_of_a_policy_file_never_blocks(self):
         fifos = [("Claude Code", self.home / ".claude" / "remote-settings.json"),
                  ("Claude Code", self.home / ".claude" / "settings.json"),

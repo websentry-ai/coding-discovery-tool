@@ -309,8 +309,23 @@ def _segment_runs(words: List[str], wanted: set, home: Path) -> bool:
         return _is_unbound_binary(program) and _can_execute(program)
     # Run as the program itself (no interpreter in front, env wrappers aside), the script needs its execute bit.
     launched = _launched_word(words)
-    run_directly = launched is not None and _program_path(launched, None, None, home) == program
-    return not run_directly or _can_execute(program)
+    if launched is None:
+        return False
+    if _program_path(launched, None, None, home) == program:
+        return _can_execute(program)
+    # Run through an interpreter: one named by a path must be there and runnable; a bare name is
+    # looked up on the hook's PATH, which this machine's scan can't know, so it is taken as present.
+    interpreter = _expand_home(launched.strip('"\''), home)
+    if os.path.isabs(interpreter):
+        return os.path.isfile(interpreter) and _can_execute(Path(interpreter))
+    return True
+
+
+def _expand_home(word: str, home: Path) -> str:
+    for prefix in ("~/", "$HOME/", "${HOME}/"):
+        if word.startswith(prefix):
+            return str(home / word[len(prefix):])
+    return word
 
 
 def _launched_word(words: List[str]) -> Optional[str]:

@@ -146,6 +146,18 @@ class TestClaudeCodeHookPolicy(_FixtureMachine):
         self.assertTrue(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"])
 
     @unittest.skipIf(os.name == "nt", "Windows has no execute bit")
+    def test_an_interpreter_named_by_a_path_that_cannot_run_is_not_a_working_hook(self):
+        real = self.root / "bin" / "python3"
+        real.parent.mkdir()
+        real.write_text("")
+        real.chmod(0o755)
+        for interpreter, works in ((real, True), (self.root / "missing" / "python3", False)):
+            self.console({"hooks": self.hooks_running(f'"{interpreter}" "{self.our_script}"')})
+            self.assertIs(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"], works, interpreter)
+        real.chmod(0o644)
+        self.assertFalse(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"])
+
+    @unittest.skipIf(os.name == "nt", "Windows has no execute bit")
     def test_the_unbound_binary_without_its_execute_bit_is_not_a_working_hook(self):
         self.our_binary.chmod(0o644)
         self.console({"hooks": self.hooks_running(f'"{self.our_binary}"')})

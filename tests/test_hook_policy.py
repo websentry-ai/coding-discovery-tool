@@ -185,8 +185,13 @@ class TestClaudeCodeHookPolicy(_FixtureMachine):
         self.assertFalse(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"])
 
     def test_our_script_run_through_env_or_a_versioned_interpreter_counts(self):
+        # An interpreter named by its path must exist, so the test brings its own (CI's Windows has no /usr/bin).
+        python = self.root / "usr" / "bin" / "python3"
+        python.parent.mkdir(parents=True)
+        python.write_text("")
+        python.chmod(0o755)
         for command in (f'/usr/bin/env python3 "{self.our_script}"', f'python3.11 "{self.our_script}"',
-                        f'/usr/bin/python3 -u "{self.our_script}"', f'py -3 "{self.our_script}"'):
+                        f'"{python}" -u "{self.our_script}"', f'py -3 "{self.our_script}"'):
             self.console({"hooks": self.hooks_running(command)})
             self.assertTrue(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"], command)
 

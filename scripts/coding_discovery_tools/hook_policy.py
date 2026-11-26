@@ -305,9 +305,10 @@ def _segment_runs(words: List[str], wanted: set, home: Path) -> bool:
     program = _program_path(" ".join(words), None, None, home)
     if program is None:
         return False
-    if os.path.normcase(os.path.normpath(str(program))) not in wanted:
-        return _is_unbound_binary(program) and _can_execute(program)
-    # Run as the program itself (no interpreter in front, env wrappers aside), the script needs its execute bit.
+    ours = os.path.normcase(os.path.normpath(str(program))) in wanted or _is_unbound_binary(program)
+    if not ours:
+        return False
+    # Run as the program itself (no interpreter in front, env wrappers aside), it needs its execute bit.
     launched = _launched_word(words)
     if launched is None:
         return False

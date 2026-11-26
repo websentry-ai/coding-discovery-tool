@@ -165,6 +165,12 @@ class TestClaudeCodeHookPolicy(_FixtureMachine):
         self.our_binary.chmod(0o755)
         self.assertTrue(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"])
 
+    @unittest.skipIf(os.name == "nt", "Windows has no execute bit")
+    def test_the_unbound_binary_behind_a_missing_interpreter_is_not_a_working_hook(self):
+        missing = self.root / "missing" / "python3"
+        self.console({"hooks": self.hooks_running(f'"{missing}" "{self.our_binary}" hook claude-code PreToolUse')})
+        self.assertFalse(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"])
+
     def test_our_script_only_named_as_an_argument_is_not_our_hook(self):
         self.console({"hooks": self.hooks_running(f'/usr/bin/cat "{self.our_script}"')})
 

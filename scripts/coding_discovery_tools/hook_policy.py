@@ -31,6 +31,7 @@ import platform
 import plistlib
 import re
 import shlex
+import stat
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -315,12 +316,12 @@ def _segment_runs(words: List[str], wanted: set, home: Path) -> bool:
     if launched is None:
         return False
     if _program_path(launched, None, None, home) == program:
-        return _can_execute(program)
+        return _can_execute(program, home)
     # Run through an interpreter: one named by a path must be there and runnable; a bare name is
     # looked up on the hook's PATH, which this machine's scan can't know, so it is taken as present.
     interpreter = _expand_home(launched.strip('"\''), home)
     if os.path.isabs(interpreter):
-        return os.path.isfile(interpreter) and _can_execute(Path(interpreter))
+        return os.path.isfile(interpreter) and _can_execute(Path(interpreter), home)
     return True
 
 
@@ -344,9 +345,31 @@ def _launched_word(words: List[str]) -> Optional[str]:
     return None
 
 
-def _can_execute(program: Path) -> bool:
-    """Windows has no execute bit; elsewhere the file must be executable for the shell to start it."""
-    return os.name == "nt" or os.access(str(program), os.X_OK)
+def _can_execute(program: Path, home: Path) -> bool:
+    """Whether the user at ``home`` (its owner) can execute ``program``. Windows has no execute bit. A root
+    scan can execute what the user can't, so as root the user's own owner, group or other bit decides."""
+    if os.name == "nt":
+        return True
+    if os.geteuid() != 0:
+        return os.access(str(program), os.X_OK)
+    try:
+        st, uid = os.stat(str(program)), os.stat(str(home)).st_uid
+    except OSError:
+        return False
+    if st.st_uid == uid:
+        return bool(st.st_mode & stat.S_IXUSR)
+    if st.st_gid in _groups_of(uid):
+        return bool(st.st_mode & stat.S_IXGRP)
+    return bool(st.st_mode & stat.S_IXOTH)
+
+
+def _groups_of(uid: int) -> set:
+    try:
+        import pwd
+        user = pwd.getpwuid(uid)
+        return set(os.getgrouplist(user.pw_name, user.pw_gid))
+    except (ImportError, KeyError, OSError, AttributeError):
+        return set()
 
 
 def _is_unbound_binary(program: Path) -> bool:

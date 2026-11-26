@@ -134,6 +134,17 @@ class TestClaudeCodeHookPolicy(_FixtureMachine):
         self.assertTrue(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"])
 
     @unittest.skipIf(os.name == "nt", "Windows has no execute bit")
+    def test_the_execute_bit_is_read_for_the_user_not_for_a_root_scan(self):
+        """Discovery may run as root, which can execute what the user can't; the hook runs as the user."""
+        self.our_script.chmod(0o644)
+        self.console({"hooks": self.hooks_running(self.our_hook_command())})
+        with patch.object(hook_policy.os, "geteuid", return_value=0), \
+             patch.object(hook_policy.os, "access", return_value=True):
+            self.assertFalse(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"])
+            self.our_script.chmod(0o744)
+            self.assertTrue(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"])
+
+    @unittest.skipIf(os.name == "nt", "Windows has no execute bit")
     def test_a_directly_run_script_without_its_execute_bit_is_not_a_working_hook(self):
         self.our_script.chmod(0o644)
         for command in (self.our_hook_command(), f'env UNBOUND_DEBUG=1 "{self.our_script}"',

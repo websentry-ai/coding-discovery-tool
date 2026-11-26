@@ -54,7 +54,7 @@ class _FixtureMachine(unittest.TestCase):
         self.our_binary.write_text("")
         self._stack = ExitStack()
         for p in (
-            patch.object(hook_policy.platform, "system", return_value="Darwin"),
+            patch.object(hook_policy, "platform", Mock(system=Mock(return_value="Darwin"))),  # this module only
             patch.dict(hook_policy.CLAUDE_MANAGED_DIRS, {"Darwin": self.claude_managed}),
             patch.dict(hook_policy.CODEX_SYSTEM_DIRS, {"Darwin": self.codex_system}),
             patch.object(hook_policy, "MANAGED_PREFERENCES_DIR", self.prefs),
@@ -267,7 +267,7 @@ class TestClaudeCodeHookPolicy(_FixtureMachine):
         self.assertIsNone(policy["hooks_disabled"])  # the file's disableAllHooks would merge in
 
     def test_windows_hklm_policy_is_mdm(self):
-        with patch.object(hook_policy.platform, "system", return_value="Windows"), \
+        with patch.object(hook_policy, "platform", Mock(system=Mock(return_value="Windows"))), \
              patch.dict(hook_policy.CLAUDE_MANAGED_DIRS, {"Windows": self.claude_managed}), \
              patch.object(hook_policy, "_read_hklm_claude_settings",
                           return_value=json.dumps({"disableAllHooks": True})):
@@ -305,6 +305,12 @@ class TestCodexHookPolicy(_FixtureMachine):
         self.config('model = "gpt-5"\n')
 
         self.assertFalse(hook_policy_for("Codex", self.home)["hooks_disabled"])
+
+    def test_commented_table_header_is_read_by_both_parsers(self):
+        for text in ("[features] # feature flags\nhooks = false\n", "[features]  # see [docs\nhooks = false\n"):
+            self.assertIs(hook_policy._toml_hooks_feature_by_line(text), False, text)
+            self.config(text)
+            self.assertTrue(hook_policy_for("Codex", self.home)["hooks_disabled"], text)
 
     def test_broken_config_fails_open(self):
         self.config("[features\nhooks = false\n")

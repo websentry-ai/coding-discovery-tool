@@ -357,7 +357,7 @@ def _decode_base64(value):
         return _UNREADABLE
 
 
-_FEATURES_TABLE = re.compile(r"^\s*\[\s*features\s*\]\s*$")
+_FEATURES_TABLE = re.compile(r"^\s*\[\s*features\s*\]\s*(#.*)?$")
 _ANY_TABLE = re.compile(r"^\s*\[")
 _FEATURE_FLAG = re.compile(r"^\s*(hooks|codex_hooks)\s*=\s*(true|false)\s*(#.*)?$")
 
@@ -385,7 +385,8 @@ def _toml_hooks_feature_by_line(text: str):
     in_features, found = False, {}
     for line in text.splitlines():
         if _ANY_TABLE.match(line):
-            if line.count("[") != line.count("]"):
+            header = line.split("#", 1)[0]
+            if header.count("[") != header.count("]"):
                 return _UNREADABLE
             in_features = bool(_FEATURES_TABLE.match(line))
             continue

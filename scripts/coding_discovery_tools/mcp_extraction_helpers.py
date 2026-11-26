@@ -2696,16 +2696,18 @@ def extract_managed_mcp_config(projects: List[Dict]) -> None:
     try:
         content = managed_path.read_text(encoding='utf-8', errors='replace')
         config_data = json.loads(content)
+        if not isinstance(config_data, dict):
+            return
 
         mcp_servers_obj = config_data.get("mcpServers", {})
         mcp_servers_array = transform_mcp_servers_to_array(mcp_servers_obj)
 
-        if mcp_servers_array:
-            projects.append({
-                "path": str(managed_path),
-                "mcpServers": mcp_servers_array,
-                "scope": "managed"
-            })
+        # An empty server list is the organization turning MCP off, so it is recorded too.
+        projects.append({
+            "path": str(managed_path),
+            "mcpServers": mcp_servers_array,
+            "scope": "managed"
+        })
     except json.JSONDecodeError as e:
         logger.warning(f"Invalid JSON in managed MCP config {managed_path}: {e}")
     except PermissionError as e:

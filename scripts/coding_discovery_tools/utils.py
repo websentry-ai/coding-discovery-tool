@@ -2,6 +2,7 @@
 Utility functions shared across the AI tools discovery system
 """
 
+import contextlib
 import copy
 import functools
 import json
@@ -3399,6 +3400,17 @@ def silence_sentry_on_this_thread() -> None:
     """Make report_to_sentry a no-op on the calling thread, for a background
     thread whose sends can fail (the scan heartbeat)."""
     _sentry_thread_state.silenced = True
+
+
+@contextlib.contextmanager
+def sentry_silenced():
+    """report_to_sentry is a no-op on this thread inside the block, for a send whose failure is expected."""
+    previous = getattr(_sentry_thread_state, "silenced", False)
+    _sentry_thread_state.silenced = True
+    try:
+        yield
+    finally:
+        _sentry_thread_state.silenced = previous
 
 
 # Held by reference, so the fields main() adds later (device_id, run_id) reach

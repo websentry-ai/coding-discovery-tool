@@ -7,8 +7,8 @@ Seams:
     hook_policy_for(tool_name, home) over fixture files in a temp dir. The system
     locations (managed settings dir, managed preferences dir, Codex system dir)
     are pointed into that temp dir; nothing reads the real machine.
-  - TestHookPolicyInReport: main() in-process with the detector and transport
-    mocked; the tool object in the payload sent to the backend carries the key.
+  - TestHookPolicyInReport: main() in-process with the detector mocked and real
+    curl sends to a localhost backend; the tool object it receives carries the key.
 """
 
 import json
@@ -21,6 +21,7 @@ import threading
 import time
 import unittest
 from contextlib import ExitStack
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -340,6 +341,9 @@ class TestCodexHookPolicy(_FixtureMachine):
             "notes = '''\nfeatures.hooks = false'''\n": None,
             'prompt = """one line"""\n[features]\nhooks = false\n': False,
             'instructions = """\n[features]\nhooks = false\n"""\n[features]\nhooks = true\n': True,
+            # Triple quotes in a comment, or inside a one-line string, open nothing.
+            'model = "gpt-5"  # see """ below\n[features]\nhooks = false\n': False,
+            "title = \"say '''hi'''\"\n[features]\nhooks = false\n": False,
         }
         for text, expected in cases.items():
             with self.subTest(text=text):
@@ -380,11 +384,34 @@ class TestVSCodeHookPolicy(_FixtureMachine):
         self.assertIsNone(hook_policy_for("Cursor", self.home))
 
 
+class _ReportServer(BaseHTTPRequestHandler):
+    """The backend for main(): records each JSON body by path. The S3 upload path is refused, so data
+    reports take the direct POST that carries them."""
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if "upload-url" in self.path:
+            self.send_response(404)
+            self.end_headers()
+            return
+        try:
+            self.server.bodies.append((self.path, json.loads(body or b"{}")))
+        except ValueError:
+            pass
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"status": "queued"}')
+
+    def log_message(self, *args):
+        pass
+
+
 class _DiscoveryRun(_FixtureMachine):
-    """main() in-process with the detector and transport mocked."""
+    """main() in-process with the detector mocked and real sends to a localhost backend."""
 
     def _run_main(self, *more):
-        """main() over a Claude Code and a Zed install for alice; returns the send_report_to_backend mock."""
+        """main() over a Claude Code and a Zed install for alice; returns the bodies the backend received."""
         import scripts.coding_discovery_tools.ai_tools_discovery as adm
 
         tools = [{"name": "Claude Code", "install_path": "/x/claude", "version": "1"},
@@ -397,8 +424,12 @@ class _DiscoveryRun(_FixtureMachine):
             "name": tool["name"], "projects": [], "version": "1", "install_path": tool["install_path"]}
         real_report = adm.AIToolsDetector.generate_single_tool_report  # before the class is mocked
         detector.generate_single_tool_report.side_effect = lambda *a: real_report(None, *a)
-        sent = Mock(return_value=(True, False))
-        argv = ["ai_tools_discovery.py", "--api-key", "k", "--domain", "http://127.0.0.1:1"]
+        server = HTTPServer(("127.0.0.1", 0), _ReportServer)
+        server.bodies = []
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        argv = ["ai_tools_discovery.py", "--api-key", "k", "--domain", f"http://127.0.0.1:{server.server_address[1]}"]
         patches = [
             patch.object(adm, "platform", _platform_reporting("Darwin")),  # this module only
             patch.object(adm.discovery_cache, "acquire_lock", return_value="acquired"),
@@ -416,9 +447,6 @@ class _DiscoveryRun(_FixtureMachine):
                 "install_path": tool["install_path"]}),
             patch.object(adm, "find_claude_binary_for_user", return_value=None),
             patch.object(adm, "get_claude_subscription_type", return_value=None),
-            patch.object(adm, "send_scan_event", Mock(return_value=(True, None))),
-            patch.object(adm, "send_report_to_backend", sent),
-            patch.object(adm, "send_discovery_metrics", Mock()),
             patch.object(adm, "run_sweep", Mock(return_value=(0, 0, 0))),
             patch.object(adm, "load_pending_reports", return_value=[]),
             patch.object(adm, "save_failed_reports", Mock()),
@@ -436,13 +464,12 @@ class _DiscoveryRun(_FixtureMachine):
                 adm.main()
             except SystemExit:
                 pass
-        return sent
+        return list(server.bodies)
 
     @staticmethod
-    def _sent_tools(sent) -> dict:
+    def _sent_tools(bodies) -> dict:
         by_tool = {}
-        for call in sent.call_args_list:
-            report = call.args[2]
+        for _, report in bodies:
             for tool in report.get("tools") or []:
                 by_tool[tool["name"]] = tool
         return by_tool

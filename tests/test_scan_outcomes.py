@@ -122,6 +122,22 @@ class TestLockHeldRunIsRecorded(unittest.TestCase):
         send.assert_not_called()
         self.assertFalse((state / "device-id").exists(), "the skipped run created the device id")
 
+    def test_a_failing_skipped_report_never_reaches_sentry(self):
+        """A run that lost the lock is redundant: an old backend or an outage must not page Sentry every run."""
+        import scripts.coding_discovery_tools.ai_tools_discovery as adm
+        silenced_during_send = []
+
+        def send(*args, **kwargs):
+            silenced_during_send.append(getattr(utils_mod._sentry_thread_state, "silenced", False))
+            return (False, "400")
+
+        args = Mock(domain="http://127.0.0.1:1", api_key="k", app_name=None)
+        with patch.object(adm, "send_scan_event", side_effect=send):
+            adm._report_scan_skipped(args, {})
+
+        self.assertEqual(silenced_during_send, [True])
+        self.assertFalse(getattr(utils_mod._sentry_thread_state, "silenced", False), "the main thread stays silenced")
+
 
 class TestScanHeartbeats(unittest.TestCase):
 

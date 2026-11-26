@@ -386,18 +386,42 @@ def _toml_hooks_feature(text: str):
     return None
 
 
+def _multiline_string_left_open(line: str, open_string):
+    """The triple-quote delimiter still open after this line, given the one open before it (or None).
+    Comments and one-line strings are skipped, so quotes inside them open nothing."""
+    i = 0
+    while i < len(line):
+        if open_string:
+            end = line.find(open_string, i)
+            if end < 0:
+                return open_string
+            i, open_string = end + 3, None
+            continue
+        if line[i] == "#":
+            return None
+        if line.startswith('"""', i) or line.startswith("'''", i):
+            open_string, i = line[i:i + 3], i + 3
+            continue
+        if line[i] in "\"'":
+            end = line.find(line[i], i + 1)
+            while line[i] == '"' and end > 0 and line[end - 1] == "\\":
+                end = line.find('"', end + 1)
+            if end < 0:
+                return None
+            i = end + 1
+            continue
+        i += 1
+    return open_string
+
+
 def _toml_hooks_feature_by_line(text: str):
     """Python < 3.11 has no tomllib: read the features flags from a [features] table, or from
     root-level ``features.hooks = ...`` and ``features = { hooks = ... }`` lines."""
     in_root, in_features, found, open_string = True, False, {}, None
     for line in text.splitlines():
-        if open_string:  # inside a multi-line string: its lines are a value, not tables or flags
-            if line.count(open_string) % 2:
-                open_string = None
-            continue
-        quotes = [q for q in ('"""', "'''") if line.count(q) % 2]
-        if quotes:  # this line opens a multi-line string that later lines continue
-            open_string = quotes[0]
+        started_in_string = open_string is not None
+        open_string = _multiline_string_left_open(line, open_string)
+        if started_in_string or open_string:  # a multi-line string's lines are a value, not tables or flags
             continue
         if _ANY_TABLE.match(line):
             header = line.split("#", 1)[0]

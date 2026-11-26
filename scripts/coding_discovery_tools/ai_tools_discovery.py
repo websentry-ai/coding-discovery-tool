@@ -129,6 +129,7 @@ try:
     from .mcp_extraction_helpers import (
         claude_cli_and_desktop_share_account,
         extract_claudeai_mcp_servers_with_root_support,
+        get_managed_mcp_path,
     )
     from .sweep_connectors import run_sweep
 except ImportError:
@@ -219,6 +220,7 @@ except ImportError:
     from scripts.coding_discovery_tools.mcp_extraction_helpers import (
         claude_cli_and_desktop_share_account,
         extract_claudeai_mcp_servers_with_root_support,
+        get_managed_mcp_path,
     )
     from scripts.coding_discovery_tools.sweep_connectors import run_sweep
 
@@ -365,6 +367,15 @@ def _install_in_another_users_home(tool: Dict, user_home, other_homes) -> bool:
     return False
 
 
+def _is_managed_mcp_project(project: Dict) -> bool:
+    """Whether a project is Claude Code's organization MCP file, which belongs to every user."""
+    managed = get_managed_mcp_path()
+    if not managed or not isinstance(project, dict):
+        return False
+    fold_case = str.lower if os.name == "nt" else str
+    return fold_case(_normalise_path(str(project.get("path") or ""))) == fold_case(_normalise_path(str(managed)))
+
+
 def _under_home(path: str, home: Path) -> bool:
     """Whether ``path`` is ``home`` or inside it."""
     fold_case = str.lower if os.name == "nt" else str
@@ -452,13 +463,19 @@ def _is_policy_hook(hook: Dict, user_home) -> bool:
 
 
 def _has_owned_projects(tool_filtered: Dict, user_home=None) -> bool:
-    """Whether the user has projects of their own; a row holding only policy hooks (managed or Unbound's) is not theirs."""
+    """Whether the user has projects of their own; a row holding only organization policy (managed hooks, rules or
+    MCP, or Unbound's hook) is not theirs."""
     for project in tool_filtered.get("projects") or []:
         if not isinstance(project, dict):
             return True
+        if _is_managed_mcp_project(project):
+            continue
         hooks = project.get("hooks") or []
-        other = any(value for key, value in project.items() if key not in ("path", "hooks"))
-        if other or not hooks or not all(_is_policy_hook(hook, user_home) for hook in hooks):
+        rules = project.get("rules") or []
+        own_rules = [rule for rule in rules if not (isinstance(rule, dict) and rule.get("scope") == "managed")]
+        other = own_rules or any(value for key, value in project.items() if key not in ("path", "hooks", "rules"))
+        has_policy = bool(hooks) or len(own_rules) < len(rules)
+        if other or not has_policy or not all(_is_policy_hook(hook, user_home) for hook in hooks):
             return True
     return False
 
@@ -530,7 +547,11 @@ def _has_user_owned_data(tool_name: str, tool_filtered: Dict, user_home) -> bool
     if _has_owned_projects(tool_filtered, user_home):
         return True
     perms = tool_filtered.get("permissions")
-    return perms is not None and perms.get("settings_source") != "managed"
+    if perms is None:
+        return False
+    # A merged record is labelled managed once company settings exist; the user's own file still counts.
+    return perms.get("settings_source") != "managed" or any(
+        _under_home(path, user_home) for path in perms.get("contributing_paths") or [])
 
 
 def _decode_project_path(path):
@@ -2041,25 +2062,29 @@ class AIToolsDetector:
                 # Add managed rules to every discovered user home
                 if managed_rules:
                     logger.info(f"  ✓ Found {len(managed_rules)} managed rule(s)")
-                    user_homes = set()
+                    user_homes: Dict[str, str] = {}  # normalised home -> first spelling seen
+
+                    def add_home(home: str) -> None:
+                        key = _normalise_path(home)
+                        user_homes.setdefault(key.lower() if self.system == "Windows" else key, home)
+
                     for rule in user_rules:
                         if rule.get("project_path"):
-                            user_homes.add(rule["project_path"])
+                            add_home(rule["project_path"])
+                    # Every account, not only those with rules of their own: the policy applies to all.
+                    if self.system == "Darwin":
+                        for username in get_all_users_macos():
+                            add_home(str(Path("/Users") / username))
+                    elif self.system == "Windows":
+                        for home in windows_user_homes().values():
+                            add_home(str(home))
+                    elif self.system == "Linux":
+                        for username in get_all_users_linux():
+                            # `root` user's home is /root, not /home/root.
+                            add_home(str(linux_home_for_user(username)))
                     if not user_homes:
-                        if self.system == "Darwin":
-                            for username in get_all_users_macos():
-                                user_homes.add(str(Path("/Users") / username))
-                        elif self.system == "Windows":
-                            for home in windows_user_homes().values():
-                                user_homes.add(str(home))
-                        elif self.system == "Linux":
-                            for username in get_all_users_linux():
-                                # `root` user's home is /root, not /home/root.
-                                home = linux_home_for_user(username)
-                                user_homes.add(str(home))
-                    if not user_homes:
-                        user_homes.add(str(Path.home()))
-                    for user_home in user_homes:
+                        add_home(str(Path.home()))
+                    for user_home in user_homes.values():
                         if user_home not in projects_dict:
                             projects_dict[user_home] = {
                                 "path": user_home,
@@ -2252,6 +2277,8 @@ class AIToolsDetector:
 
     def _is_project_empty(self, project: Dict) -> bool:
         """Check if a project has no meaningful data (empty mcpServers, rules, and skills)."""
+        if _is_managed_mcp_project(project):
+            return False  # an empty organization MCP file means MCP is turned off
         mcp_servers = project.get("mcpServers", [])
         rules = project.get("rules", [])
         skills = project.get("skills", [])
@@ -2385,8 +2412,9 @@ class AIToolsDetector:
 
         for project in tool.get('projects', []):
             project_path_norm = _normalise_path(project.get('path', ''))
-            # Checking if project path is under the user's home directory
-            if project_path_norm == user_home_norm or project_path_norm.startswith(user_home_norm + '/'):
+            # The user's own projects, plus the organization MCP file every user runs under.
+            if project_path_norm == user_home_norm or project_path_norm.startswith(user_home_norm + '/') \
+                    or _is_managed_mcp_project(project):
                 filtered_projects.append(project)
 
         filtered_tool = tool.copy()

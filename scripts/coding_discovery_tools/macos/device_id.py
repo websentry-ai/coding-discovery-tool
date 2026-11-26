@@ -21,7 +21,7 @@ class MacOSDeviceIdExtractor(BaseDeviceIdExtractor):
         Raises:
             RuntimeError: if the serial cannot be read
         """
-        output = run_command(["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"], COMMAND_TIMEOUT)
+        output = run_command(["/usr/sbin/ioreg", "-rd1", "-c", "IOPlatformExpertDevice"], COMMAND_TIMEOUT)
         for line in (output or "").split("\n"):
             if "IOPlatformSerialNumber" in line and "=" in line:
                 serial = line.split("=", 1)[1].strip().strip('"').strip()

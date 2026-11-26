@@ -126,6 +126,22 @@ class TestLinuxDeviceIdFallback(unittest.TestCase):
         with patch.object(did_mod, "_MACHINE_ID_PATHS", [FakeMachineIdPath()]):
             self.assertEqual(self.extractor.extract_device_id(), "abc123machineid")
 
+    def test_a_lookup_that_may_not_create_never_writes_an_id(self):
+        """A skipped run reads the id the lock holder made; it never races it by making its own."""
+        from scripts.coding_discovery_tools.linux import device_id as did_mod
+
+        fixed = "11111111-2222-3333-4444-555555555555"
+        with patch.object(did_mod, "_MACHINE_ID_PATHS", []), \
+             patch.object(did_mod.cache, "_ensure_state_dir", return_value=True), \
+             patch.object(did_mod.cache, "UNBOUND_DIR", self.state_dir):
+            self.assertIsNone(self.extractor.extract_device_id(create=False))
+            self.assertFalse(self.device_id_path.exists())
+            self.device_id_path.write_text(fixed, encoding="utf-8")
+            self.assertEqual(self.extractor.extract_device_id(create=False), fixed)
+        with patch.object(did_mod.cache, "_ensure_state_dir", return_value=False), \
+             patch.object(did_mod, "_MACHINE_ID_PATHS", []):
+            self.assertIsNone(self.extractor.extract_device_id(create=False))
+
     def test_fallback_generates_and_persists_uuid(self):
         """First call with empty machine-id -> generate uuid4 and write it.
 

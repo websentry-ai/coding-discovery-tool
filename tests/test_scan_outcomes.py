@@ -107,6 +107,21 @@ class TestLockHeldRunIsRecorded(unittest.TestCase):
         self.assertEqual(result.returncode, 0, f"stderr: {result.stderr}")
         self.assertIn(SKIPPED_LINE, result.stdout.splitlines())
 
+    def test_a_skipped_run_on_a_linux_device_with_no_id_yet_sends_nothing(self):
+        import scripts.coding_discovery_tools.ai_tools_discovery as adm
+        from scripts.coding_discovery_tools.linux import device_id as did_mod
+        state = Path(self.home) / "state"
+        args = Mock(domain="http://127.0.0.1:1", api_key="k", app_name=None)
+        with patch.object(adm.platform, "system", return_value="Linux"), \
+             patch.object(did_mod, "_MACHINE_ID_PATHS", []), \
+             patch.object(did_mod.cache, "_ensure_state_dir", return_value=True), \
+             patch.object(did_mod.cache, "UNBOUND_DIR", state), \
+             patch.object(adm, "send_scan_event") as send:
+            adm._report_scan_skipped(args, {})
+
+        send.assert_not_called()
+        self.assertFalse((state / "device-id").exists(), "the skipped run created the device id")
+
 
 class TestScanHeartbeats(unittest.TestCase):
 

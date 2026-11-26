@@ -3878,7 +3878,13 @@ def _report_scan_skipped(args, sentry_ctx: Dict) -> None:
     sees a skipped scan rather than none. Best-effort and bounded: it never
     changes the exit code."""
     try:
-        device_id = DeviceIdExtractorFactory.create(platform.system()).extract_device_id()
+        system = platform.system()
+        extractor = DeviceIdExtractorFactory.create(system)
+        # Linux may have to make the id; only the lock holder does, so a first run is never split in two.
+        device_id = extractor.extract_device_id(create=False) if system == "Linux" else extractor.extract_device_id()
+        if not device_id:
+            logger.debug("Skipped scan not reported: this device has no id yet")
+            return
         send_scan_event(
             args.domain, args.api_key, device_id, str(uuid.uuid4()), "skipped",
             args.app_name, sentry_context=sentry_ctx, reason=SCAN_SKIPPED_REASON,

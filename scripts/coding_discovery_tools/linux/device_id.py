@@ -4,6 +4,7 @@ import logging
 import os
 import tempfile
 import uuid
+from typing import Optional
 from pathlib import Path
 
 from .. import cache
@@ -22,7 +23,7 @@ _DEVICE_ID_FILENAME = "device-id"
 class LinuxDeviceIdExtractor(BaseDeviceIdExtractor):
     """Device ID extractor for Linux systems."""
 
-    def extract_device_id(self) -> str:
+    def extract_device_id(self, create: bool = True) -> Optional[str]:
         """
         Return the machine-id from /etc/machine-id (systemd standard).
 
@@ -42,10 +43,10 @@ class LinuxDeviceIdExtractor(BaseDeviceIdExtractor):
             except Exception as e:
                 logger.debug(f"Could not read {path}: {e}")
 
-        return self._persisted_device_id()
+        return self._persisted_device_id(create)
 
     @staticmethod
-    def _persisted_device_id() -> str:
+    def _persisted_device_id(create: bool = True) -> Optional[str]:
         """Read (or generate-and-persist) a stable UUID under ``~/.unbound/``.
 
         Reuses the repo's canonical state-dir resolver (``cache._ensure_state_dir``)
@@ -56,6 +57,8 @@ class LinuxDeviceIdExtractor(BaseDeviceIdExtractor):
         """
         try:
             if not cache._ensure_state_dir():
+                if not create:
+                    return None
                 logger.warning("No usable state dir for device-id; using ephemeral uuid")
                 return str(uuid.uuid4())
 
@@ -82,6 +85,8 @@ class LinuxDeviceIdExtractor(BaseDeviceIdExtractor):
             except Exception as e:
                 logger.warning(f"Could not read persisted device-id at {device_id_path!s}: {e}")
 
+            if not create:
+                return None  # a skipped run must not race the lock holder to make the id
             new_id = str(uuid.uuid4())
             try:
                 # Atomic write: a SIGKILL/OOM/power-loss mid-write must never leave

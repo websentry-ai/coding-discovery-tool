@@ -335,6 +335,11 @@ class TestCodexHookPolicy(_FixtureMachine):
             'features = { "hooks" = false }\n': False,
             # Under another table the same text names a different key, so it decides nothing.
             "[profile]\nfeatures.hooks = false\n": None,
+            # Text inside a multi-line string is a value, not a table or a flag; a real flag after it still counts.
+            'instructions = """\n[features]\nhooks = false\n"""\n': None,
+            "notes = '''\nfeatures.hooks = false'''\n": None,
+            'prompt = """one line"""\n[features]\nhooks = false\n': False,
+            'instructions = """\n[features]\nhooks = false\n"""\n[features]\nhooks = true\n': True,
         }
         for text, expected in cases.items():
             with self.subTest(text=text):

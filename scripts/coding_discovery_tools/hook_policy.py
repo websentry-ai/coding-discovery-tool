@@ -389,8 +389,16 @@ def _toml_hooks_feature(text: str):
 def _toml_hooks_feature_by_line(text: str):
     """Python < 3.11 has no tomllib: read the features flags from a [features] table, or from
     root-level ``features.hooks = ...`` and ``features = { hooks = ... }`` lines."""
-    in_root, in_features, found = True, False, {}
+    in_root, in_features, found, open_string = True, False, {}, None
     for line in text.splitlines():
+        if open_string:  # inside a multi-line string: its lines are a value, not tables or flags
+            if line.count(open_string) % 2:
+                open_string = None
+            continue
+        quotes = [q for q in ('"""', "'''") if line.count(q) % 2]
+        if quotes:  # this line opens a multi-line string that later lines continue
+            open_string = quotes[0]
+            continue
         if _ANY_TABLE.match(line):
             header = line.split("#", 1)[0]
             if header.count("[") != header.count("]"):

@@ -29,7 +29,6 @@ import logging
 import os
 import platform
 import plistlib
-import re
 import shlex
 import stat
 from pathlib import Path
@@ -43,6 +42,14 @@ except ImportError:  # pragma: no cover - direct-script execution fallback
     from hooks_extractor import _command_of, _iter_commands, _program_path
     from mcp_extraction_helpers import _strip_jsonc_comments, _strip_trailing_commas
     from rule_read_helpers import read_rule_file_contained
+
+try:
+    import tomllib as _toml
+except ImportError:  # Python < 3.11: tomli, the same parser, bundled with discovery
+    try:
+        from ._vendor import tomli as _toml
+    except ImportError:  # pragma: no cover - direct-script execution fallback
+        from _vendor import tomli as _toml
 
 logger = logging.getLogger(__name__)
 
@@ -421,52 +428,12 @@ def _decode_base64(value):
         return _UNREADABLE
 
 
-# TOML keys may be bare or quoted ("hooks", 'hooks'); the quotes are optional around each name.
-_FEATURES = r"""["']?features["']?"""
-_FLAG = r"""["']?(hooks|codex_hooks)["']?"""
-_FEATURES_TABLE = re.compile(r"^\s*\[\s*" + _FEATURES + r"\s*\]\s*(#.*)?$")
-_ANY_TABLE = re.compile(r"^\s*\[")
-_FEATURE_FLAG = re.compile(r"^\s*" + _FLAG + r"\s*=\s*(true|false)\s*(#.*)?$")
-_DOTTED_FLAG = re.compile(r"^\s*" + _FEATURES + r"\s*\.\s*" + _FLAG + r"\s*=\s*(true|false)\s*(#.*)?$")
-_INLINE_FEATURES = re.compile(r"^\s*" + _FEATURES + r"\s*=\s*\{")
-_INLINE_FLAG = re.compile(r"^\s*" + _FLAG + r"\s*=\s*(true|false)\s*$")
-
-
-def _inline_table_entries(text: str) -> Optional[List[str]]:
-    """The top-level ``key = value`` entries of the inline table that starts ``text`` after its ``{``,
-    or None if it never closes. Nested tables, arrays and quoted strings are kept whole."""
-    entries, depth, start, quote, i = [], 0, 0, None, 0
-    while i < len(text):
-        char = text[i]
-        if quote:
-            if char == "\\" and quote == '"':
-                i += 1
-            elif char == quote:
-                quote = None
-        elif char in "\"'":
-            quote = char
-        elif char in "{[":
-            depth += 1
-        elif char in "]}":
-            if depth == 0:
-                return entries + [text[start:i]]
-            depth -= 1
-        elif char == "," and depth == 0:
-            entries.append(text[start:i])
-            start = i + 1
-        i += 1
-    return None
-
-
-def _toml_hooks_feature(text: str):
-    """True/False from [features] hooks (or codex_hooks), None when unset."""
+def _toml_hooks_feature(text: str, toml=None):
+    """True/False from [features] hooks (or codex_hooks), None when unset. ``toml`` is the parser module."""
+    toml = toml or _toml
     try:
-        import tomllib
-    except ImportError:
-        return _toml_hooks_feature_by_line(text)
-    try:
-        features = tomllib.loads(text).get("features")
-    except tomllib.TOMLDecodeError:
+        features = toml.loads(text).get("features")
+    except toml.TOMLDecodeError:
         return _UNREADABLE
     if not isinstance(features, dict):
         return None
@@ -474,66 +441,6 @@ def _toml_hooks_feature(text: str):
         if isinstance(features.get(key), bool):
             return features[key]
     return None
-
-
-def _multiline_string_left_open(line: str, open_string):
-    """The triple-quote delimiter still open after this line, given the one open before it (or None).
-    Comments and one-line strings are skipped, so quotes inside them open nothing."""
-    i = 0
-    while i < len(line):
-        if open_string:
-            end = line.find(open_string, i)
-            if end < 0:
-                return open_string
-            backslashes = len(line[:end]) - len(line[:end].rstrip("\\"))
-            if open_string == '"""' and backslashes % 2:  # an escaped quote in a basic string, not its end
-                i = end + 1
-                continue
-            i, open_string = end + 3, None
-            continue
-        if line[i] == "#":
-            return None
-        if line.startswith('"""', i) or line.startswith("'''", i):
-            open_string, i = line[i:i + 3], i + 3
-            continue
-        if line[i] in "\"'":
-            end = line.find(line[i], i + 1)
-            while line[i] == '"' and end > 0 and line[end - 1] == "\\":
-                end = line.find('"', end + 1)
-            if end < 0:
-                return None
-            i = end + 1
-            continue
-        i += 1
-    return open_string
-
-
-def _toml_hooks_feature_by_line(text: str):
-    """Python < 3.11 has no tomllib: read the features flags from a [features] table, or from
-    root-level ``features.hooks = ...`` and ``features = { hooks = ... }`` lines."""
-    in_root, in_features, found, open_string = True, False, {}, None
-    for line in text.splitlines():
-        started_in_string = open_string is not None
-        open_string = _multiline_string_left_open(line, open_string)
-        if started_in_string or open_string:  # a multi-line string's lines are a value, not tables or flags
-            continue
-        if _ANY_TABLE.match(line):
-            header = line.split("#", 1)[0]
-            if header.count("[") != header.count("]"):
-                return _UNREADABLE
-            in_root, in_features = False, bool(_FEATURES_TABLE.match(line))
-            continue
-        if in_features:
-            pairs = [_FEATURE_FLAG.match(line)]
-        elif in_root:
-            inline = _INLINE_FEATURES.match(line)
-            entries = _inline_table_entries(line[inline.end():]) if inline else None
-            pairs = [_INLINE_FLAG.match(e) for e in entries] if entries is not None else [_DOTTED_FLAG.match(line)]
-        else:
-            pairs = []
-        for match in filter(None, pairs):
-            found[match.group(1)] = match.group(2) == "true"
-    return found.get("hooks", found.get("codex_hooks"))
 
 
 # -- VS Code --------------------------------------------------------------------

@@ -30,6 +30,19 @@ import scripts.coding_discovery_tools.utils as utils_mod
 from scripts.coding_discovery_tools.hook_policy import hook_policy_for
 
 
+
+def _toml_parsers():
+    """The bundled tomli (Python < 3.11's parser) always, and tomllib where this Python has it."""
+    from scripts.coding_discovery_tools._vendor import tomli
+    try:
+        import tomllib
+    except ImportError:
+        return (tomli,)
+    return (tomli, tomllib)
+
+
+_TOML_PARSERS = _toml_parsers()
+
 def _platform_reporting(system: str):
     """The real platform module with system() faked, for patching one module's ``platform`` name only."""
     import platform as real
@@ -382,7 +395,8 @@ class TestCodexHookPolicy(_FixtureMachine):
 
     def test_commented_table_header_is_read_by_both_parsers(self):
         for text in ("[features] # feature flags\nhooks = false\n", "[features]  # see [docs\nhooks = false\n"):
-            self.assertIs(hook_policy._toml_hooks_feature_by_line(text), False, text)
+            for toml in _TOML_PARSERS:
+                self.assertIs(hook_policy._toml_hooks_feature(text, toml), False, (toml.__name__, text))
             self.config(text)
             self.assertTrue(hook_policy_for("Codex", self.home)["hooks_disabled"], text)
 
@@ -417,7 +431,8 @@ class TestCodexHookPolicy(_FixtureMachine):
         }
         for text, expected in cases.items():
             with self.subTest(text=text):
-                self.assertIs(hook_policy._toml_hooks_feature_by_line(text), expected)
+                for toml in _TOML_PARSERS:
+                    self.assertIs(hook_policy._toml_hooks_feature(text, toml), expected, toml.__name__)
                 self.config(text)
                 policy = hook_policy_for("Codex", self.home)
                 self.assertIs(policy["hooks_disabled"], expected is False)

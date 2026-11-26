@@ -402,8 +402,34 @@ _FEATURES_TABLE = re.compile(r"^\s*\[\s*" + _FEATURES + r"\s*\]\s*(#.*)?$")
 _ANY_TABLE = re.compile(r"^\s*\[")
 _FEATURE_FLAG = re.compile(r"^\s*" + _FLAG + r"\s*=\s*(true|false)\s*(#.*)?$")
 _DOTTED_FLAG = re.compile(r"^\s*" + _FEATURES + r"\s*\.\s*" + _FLAG + r"\s*=\s*(true|false)\s*(#.*)?$")
-_INLINE_FEATURES = re.compile(r"^\s*" + _FEATURES + r"\s*=\s*\{([^{}]*)\}\s*(#.*)?$")
-_INLINE_FLAG = re.compile(r"(?:^|,)\s*" + _FLAG + r"\s*=\s*(true|false)\s*(?=,|$)")
+_INLINE_FEATURES = re.compile(r"^\s*" + _FEATURES + r"\s*=\s*\{")
+_INLINE_FLAG = re.compile(r"^\s*" + _FLAG + r"\s*=\s*(true|false)\s*$")
+
+
+def _inline_table_entries(text: str) -> Optional[List[str]]:
+    """The top-level ``key = value`` entries of the inline table that starts ``text`` after its ``{``,
+    or None if it never closes. Nested tables, arrays and quoted strings are kept whole."""
+    entries, depth, start, quote, i = [], 0, 0, None, 0
+    while i < len(text):
+        char = text[i]
+        if quote:
+            if char == "\\" and quote == '"':
+                i += 1
+            elif char == quote:
+                quote = None
+        elif char in "\"'":
+            quote = char
+        elif char in "{[":
+            depth += 1
+        elif char in "]}":
+            if depth == 0:
+                return entries + [text[start:i]]
+            depth -= 1
+        elif char == "," and depth == 0:
+            entries.append(text[start:i])
+            start = i + 1
+        i += 1
+    return None
 
 
 def _toml_hooks_feature(text: str):
@@ -471,7 +497,8 @@ def _toml_hooks_feature_by_line(text: str):
             pairs = [_FEATURE_FLAG.match(line)]
         elif in_root:
             inline = _INLINE_FEATURES.match(line)
-            pairs = list(_INLINE_FLAG.finditer(inline.group(1))) if inline else [_DOTTED_FLAG.match(line)]
+            entries = _inline_table_entries(line[inline.end():]) if inline else None
+            pairs = [_INLINE_FLAG.match(e) for e in entries] if entries is not None else [_DOTTED_FLAG.match(line)]
         else:
             pairs = []
         for match in filter(None, pairs):

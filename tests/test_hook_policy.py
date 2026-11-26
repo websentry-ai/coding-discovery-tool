@@ -375,6 +375,10 @@ class TestCodexHookPolicy(_FixtureMachine):
             '"features".hooks = false\n': False,
             "features.'hooks' = false\n": False,
             'features = { "hooks" = false }\n': False,
+            # Inline tables may hold nested tables and arrays; only a top-level hooks key counts.
+            'features = { other = { x = 1 }, hooks = false }\n': False,
+            'features = { list = [1, 2], "codex_hooks" = true, s = "a, b = {" }\n': True,
+            'features = { sub = { hooks = false } }\n': None,
             # Under another table the same text names a different key, so it decides nothing.
             "[profile]\nfeatures.hooks = false\n": None,
             # Text inside a multi-line string is a value, not a table or a flag; a real flag after it still counts.

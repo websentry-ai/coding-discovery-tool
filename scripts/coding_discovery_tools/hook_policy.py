@@ -357,12 +357,15 @@ def _decode_base64(value):
         return _UNREADABLE
 
 
-_FEATURES_TABLE = re.compile(r"^\s*\[\s*features\s*\]\s*(#.*)?$")
+# TOML keys may be bare or quoted ("hooks", 'hooks'); the quotes are optional around each name.
+_FEATURES = r"""["']?features["']?"""
+_FLAG = r"""["']?(hooks|codex_hooks)["']?"""
+_FEATURES_TABLE = re.compile(r"^\s*\[\s*" + _FEATURES + r"\s*\]\s*(#.*)?$")
 _ANY_TABLE = re.compile(r"^\s*\[")
-_FEATURE_FLAG = re.compile(r"^\s*(hooks|codex_hooks)\s*=\s*(true|false)\s*(#.*)?$")
-_DOTTED_FLAG = re.compile(r"^\s*features\s*\.\s*(hooks|codex_hooks)\s*=\s*(true|false)\s*(#.*)?$")
-_INLINE_FEATURES = re.compile(r"^\s*features\s*=\s*\{([^{}]*)\}\s*(#.*)?$")
-_INLINE_FLAG = re.compile(r"(?:^|,)\s*(hooks|codex_hooks)\s*=\s*(true|false)\s*(?=,|$)")
+_FEATURE_FLAG = re.compile(r"^\s*" + _FLAG + r"\s*=\s*(true|false)\s*(#.*)?$")
+_DOTTED_FLAG = re.compile(r"^\s*" + _FEATURES + r"\s*\.\s*" + _FLAG + r"\s*=\s*(true|false)\s*(#.*)?$")
+_INLINE_FEATURES = re.compile(r"^\s*" + _FEATURES + r"\s*=\s*\{([^{}]*)\}\s*(#.*)?$")
+_INLINE_FLAG = re.compile(r"(?:^|,)\s*" + _FLAG + r"\s*=\s*(true|false)\s*(?=,|$)")
 
 
 def _toml_hooks_feature(text: str):

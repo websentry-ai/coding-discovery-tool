@@ -327,6 +327,12 @@ class TestCodexHookPolicy(_FixtureMachine):
             "features.codex_hooks = false  # old name\n": False,
             "features = { hooks = false, web_search = true }\n": False,
             "features = { web_search = true, codex_hooks = true }  # on\n": True,
+            # Quoted keys are the same keys in TOML.
+            '[ "features" ]\n"hooks" = false\n': False,
+            "[features]\n'codex_hooks' = true\n": True,
+            '"features".hooks = false\n': False,
+            "features.'hooks' = false\n": False,
+            'features = { "hooks" = false }\n': False,
             # Under another table the same text names a different key, so it decides nothing.
             "[profile]\nfeatures.hooks = false\n": None,
         }

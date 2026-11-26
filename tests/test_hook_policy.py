@@ -63,6 +63,7 @@ class _FixtureMachine(unittest.TestCase):
         self.our_binary = self.unbound_root / "current" / "unbound-hook" / "unbound-hook"
         self.our_binary.parent.mkdir(parents=True)
         self.our_binary.write_text("")
+        self.our_binary.chmod(0o755)  # as setup installs it
         self._stack = ExitStack()
         for p in (
             patch.object(hook_policy, "platform", Mock(system=Mock(return_value="Darwin"))),  # this module only
@@ -135,11 +136,21 @@ class TestClaudeCodeHookPolicy(_FixtureMachine):
     @unittest.skipIf(os.name == "nt", "Windows has no execute bit")
     def test_a_directly_run_script_without_its_execute_bit_is_not_a_working_hook(self):
         self.our_script.chmod(0o644)
-        self.console({"hooks": self.hooks_running(self.our_hook_command())})
-        self.assertFalse(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"])
+        for command in (self.our_hook_command(), f'env UNBOUND_DEBUG=1 "{self.our_script}"',
+                        f'/usr/bin/env -i "{self.our_script}"'):
+            self.console({"hooks": self.hooks_running(command)})
+            self.assertFalse(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"], command)
 
         # Through an interpreter the bit is not needed.
         self.console({"hooks": self.hooks_running(f'python3 "{self.our_script}"')})
+        self.assertTrue(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"])
+
+    @unittest.skipIf(os.name == "nt", "Windows has no execute bit")
+    def test_the_unbound_binary_without_its_execute_bit_is_not_a_working_hook(self):
+        self.our_binary.chmod(0o644)
+        self.console({"hooks": self.hooks_running(f'"{self.our_binary}"')})
+        self.assertFalse(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"])
+        self.our_binary.chmod(0o755)
         self.assertTrue(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"])
 
     def test_our_script_only_named_as_an_argument_is_not_our_hook(self):
@@ -178,6 +189,7 @@ class TestClaudeCodeHookPolicy(_FixtureMachine):
         pinned = self.unbound_root / "0.1.46" / "unbound-hook" / "unbound-hook"
         pinned.parent.mkdir(parents=True)
         pinned.write_text("")
+        pinned.chmod(0o755)  # as setup installs it
         self.console({"hooks": self.hooks_running(f'"{pinned}" hook claude-code PreToolUse')})
         self.assertTrue(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"])
 

@@ -306,10 +306,29 @@ def _segment_runs(words: List[str], wanted: set, home: Path) -> bool:
     if program is None:
         return False
     if os.path.normcase(os.path.normpath(str(program))) not in wanted:
-        return _is_unbound_binary(program)
-    # Run as the program itself (no interpreter in front), the script needs its execute bit to start.
-    run_directly = _program_path(words[0], None, None, home) == program
-    return not (run_directly and os.name != "nt" and not os.access(str(program), os.X_OK))
+        return _is_unbound_binary(program) and _can_execute(program)
+    # Run as the program itself (no interpreter in front, env wrappers aside), the script needs its execute bit.
+    launched = _launched_word(words)
+    run_directly = launched is not None and _program_path(launched, None, None, home) == program
+    return not run_directly or _can_execute(program)
+
+
+def _launched_word(words: List[str]) -> Optional[str]:
+    """The word the shell, or an env wrapper in front of it, actually executes: env, its options and
+    NAME=value assignments are passed over."""
+    i = 0
+    while i < len(words):
+        word = words[i].strip('"\'')
+        if os.path.basename(word) == "env" or "=" in word.split("/", 1)[0] or (i and word.startswith("-")):
+            i += 1
+            continue
+        return words[i]
+    return None
+
+
+def _can_execute(program: Path) -> bool:
+    """Windows has no execute bit; elsewhere the file must be executable for the shell to start it."""
+    return os.name == "nt" or os.access(str(program), os.X_OK)
 
 
 def _is_unbound_binary(program: Path) -> bool:

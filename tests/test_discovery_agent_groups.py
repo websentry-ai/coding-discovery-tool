@@ -3,6 +3,7 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
+from scripts.coding_discovery_tools import utils
 from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector
 from scripts.coding_discovery_tools.coding_tool_factory import ToolDetectorFactory
 from scripts.coding_discovery_tools.macos.jetbrains.jetbrains import MacOSJetBrainsDetector
@@ -11,6 +12,11 @@ from scripts.coding_discovery_tools.windows.visual_studio.visual_studio import W
 
 
 class TestDiscoveryAgentGroups(unittest.TestCase):
+    def setUp(self):
+        sentry_dsn = patch.object(utils, "_SENTRY_DSN", "")
+        sentry_dsn.start()
+        self.addCleanup(sentry_dsn.stop)
+
     def test_scanner_preserves_registry_groups_through_report_generation(self):
         scanner = AIToolsDetector(os_name="Darwin")
         reported_names = {

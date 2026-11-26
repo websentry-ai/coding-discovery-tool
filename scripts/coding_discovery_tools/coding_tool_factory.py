@@ -778,7 +778,7 @@ class ToolDetectorFactory:
         if os_name is None:
             os_name = platform.system()
 
-        # A detector for multiple products sets the group on each result.
+        # Detectors with multiple sanction groups override the group on individual results.
         registrations = (
             ("cursor", ToolDetectorFactory.create_cursor_detector),
             ("claude-code", ToolDetectorFactory.create_claude_detector),
@@ -807,7 +807,7 @@ class ToolDetectorFactory:
             (GITHUB_COPILOT_GROUP_ID, ToolDetectorFactory.create_copilot_app_detector),
             ("visual-studio", ToolDetectorFactory.create_visual_studio_detector),
             ("augment-code", ToolDetectorFactory.create_augment_detector),
-            (None, ToolDetectorFactory.create_jetbrains_detector),
+            ("jetbrains-ides", ToolDetectorFactory.create_jetbrains_detector),
             ("junie", ToolDetectorFactory.create_junie_detector),
         )
         detectors = []

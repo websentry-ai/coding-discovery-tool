@@ -24,6 +24,7 @@ class TestDiscoveryAgentGroups(unittest.TestCase):
             "GitHub Copilot CLI": "GitHub Copilot in a future terminal",
             "OpenCode": "Open Code",
             "Cline": "Cline (OpenCode)",
+            "Junie": "Junie (IntelliJ IDEA)",
         }
         scanner._tool_detectors = [
             detector for detector in scanner._tool_detectors if detector.tool_name in reported_names
@@ -33,6 +34,7 @@ class TestDiscoveryAgentGroups(unittest.TestCase):
             "GitHub Copilot in a future terminal": "github-copilot",
             "Open Code": "opencode",
             "Cline (OpenCode)": "cline",
+            "Junie (IntelliJ IDEA)": "junie",
         }
         with ExitStack() as stack:
             for detector in scanner._tool_detectors:
@@ -82,7 +84,7 @@ class TestDiscoveryAgentGroups(unittest.TestCase):
                 {"visual-studio", "github-copilot"},
             )
 
-    def test_jetbrains_inventory_uses_the_config_product_instead_of_display_labels(self):
+    def test_jetbrains_inventory_reports_one_group_for_plain_ide_rows(self):
         scanner = AIToolsDetector(os_name="Darwin")
         scanner._tool_detectors = [
             detector for detector in scanner._tool_detectors if isinstance(detector, MacOSJetBrainsDetector)
@@ -97,8 +99,8 @@ class TestDiscoveryAgentGroups(unittest.TestCase):
                 "version": "2025.2",
             }
             for folder_name, label in [
-                ("IntelliJIdea2025.2", "Renamed IntelliJ"),
-                ("PyCharm2025.2", "Renamed PyCharm"),
+                ("IntelliJIdea2025.2", "IntelliJ IDEA"),
+                ("PyCharm2025.2", "PyCharm"),
             ]
         ]
         with (
@@ -106,15 +108,12 @@ class TestDiscoveryAgentGroups(unittest.TestCase):
             patch.object(detector, "_get_plugin_details", return_value=[]),
         ):
             self.assertEqual(
-                {tool["agent_group_id"] for tool in scanner.detect_all_tools()},
-                {"jetbrains-intellijidea", "jetbrains-pycharm"},
+                {tool["name"]: tool["agent_group_id"] for tool in scanner.detect_all_tools()},
+                {"IntelliJ IDEA": "jetbrains-ides", "PyCharm": "jetbrains-ides"},
             )
 
-    def test_all_supported_platforms_register_a_group_or_a_multi_product_detector(self):
+    def test_all_supported_platforms_register_a_group_for_each_detector(self):
         for platform in ("Darwin", "Windows", "Linux"):
             for detector in ToolDetectorFactory.create_all_tool_detectors(platform):
                 with self.subTest(platform=platform, detector=detector.tool_name):
-                    if detector.tool_name == "JetBrains IDEs":
-                        self.assertIsNone(detector.agent_group_id)
-                    else:
-                        self.assertRegex(detector.agent_group_id, r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+                    self.assertRegex(detector.agent_group_id, r"^[a-z0-9]+(?:-[a-z0-9]+)*$")

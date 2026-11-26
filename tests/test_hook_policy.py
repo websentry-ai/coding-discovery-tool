@@ -389,6 +389,8 @@ class TestCodexHookPolicy(_FixtureMachine):
             # Triple quotes in a comment, or inside a one-line string, open nothing.
             'model = "gpt-5"  # see """ below\n[features]\nhooks = false\n': False,
             "title = \"say '''hi'''\"\n[features]\nhooks = false\n": False,
+            # An escaped triple quote inside a basic multi-line string does not end it.
+            'p = """\nsay \\"""\n[features]\nhooks = false\n"""\n': None,
         }
         for text, expected in cases.items():
             with self.subTest(text=text):

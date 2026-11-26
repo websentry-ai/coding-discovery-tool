@@ -459,6 +459,10 @@ def _multiline_string_left_open(line: str, open_string):
             end = line.find(open_string, i)
             if end < 0:
                 return open_string
+            backslashes = len(line[:end]) - len(line[:end].rstrip("\\"))
+            if open_string == '"""' and backslashes % 2:  # an escaped quote in a basic string, not its end
+                i = end + 1
+                continue
             i, open_string = end + 3, None
             continue
         if line[i] == "#":

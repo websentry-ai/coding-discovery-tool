@@ -171,6 +171,12 @@ class TestClaudeCodeHookPolicy(_FixtureMachine):
         self.console({"hooks": self.hooks_running(f'"{missing}" "{self.our_binary}" hook claude-code PreToolUse')})
         self.assertFalse(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"])
 
+    def test_a_prompt_or_agent_hook_naming_our_script_is_not_our_hook(self):
+        for hook_type in ("prompt", "agent"):
+            self.console({"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [
+                {"type": hook_type, "prompt": self.our_hook_command()}]}]}})
+            self.assertFalse(hook_policy_for("Claude Code", self.home)["overriding_policy_has_our_hook"], hook_type)
+
     def test_our_script_only_named_as_an_argument_is_not_our_hook(self):
         self.console({"hooks": self.hooks_running(f'/usr/bin/cat "{self.our_script}"')})
 

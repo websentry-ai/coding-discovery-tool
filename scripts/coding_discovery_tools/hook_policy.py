@@ -266,8 +266,10 @@ def _runs_our_hook(doc: Dict, home: Path, managed_dir: Optional[Path]) -> bool:
         targets.append(managed_dir / "hooks" / "unbound.py")
     targets = [t for t in targets if t.is_file()]
     hooks = doc.get("hooks")
-    return any(_command_runs_our_hook(_command_of(hook)[1], targets, home)
-               for _, _, hook in _iter_commands(hooks if isinstance(hooks, dict) else {}))
+    # Only command hooks run a program; a prompt, agent or http hook's text is never executed.
+    commands = (_command_of(hook) for _, _, hook in _iter_commands(hooks if isinstance(hooks, dict) else {}))
+    return any(_command_runs_our_hook(command, targets, home) for hook_type, command in commands
+               if hook_type == "command")
 
 
 # Shell words after which the next word is the program a line runs.

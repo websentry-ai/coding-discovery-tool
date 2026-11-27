@@ -40,6 +40,14 @@ DRAIN_BUDGET_SECONDS = 600
 RUN_SEND_RESERVE_SECONDS = 300
 # Kept clear for the best-effort work that follows the completed event.
 RUN_TAIL_GRACE_SECONDS = 30
+# The backend marks a scan failed (ScanTimeout) after 10 minutes without a
+# heartbeat, and detecting tools can take longer than that, so the run re-sends
+# in_progress on this cadence until it reports its outcome.
+SCAN_HEARTBEAT_INTERVAL_SECONDS = 120
+# What one heartbeat or skipped event may spend; neither may hold up a run.
+SCAN_EVENT_SEND_SECONDS = 10
+# setup reads the stdout line built from this to report discovery as skipped.
+SCAN_SKIPPED_REASON = "another scan is running"
 
 SCRIPT_VERSION = "1.2.0"
 
@@ -110,7 +118,7 @@ try:
         VisualStudioMCPConfigExtractorFactory,
         VisualStudioRulesExtractorFactory,
     )
-    from .utils import _is_scanning_users_own_home, _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, copilot_xcode_probes, copilot_app_probes, vs_probes, windows_user_path_dirs, install_surface_listing
+    from .utils import _is_scanning_users_own_home, _windows_process_is_elevated, send_report_to_backend, send_scan_event, silence_sentry_on_this_thread, sentry_silenced, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, copilot_xcode_probes, copilot_app_probes, vs_probes, windows_user_path_dirs, install_surface_listing
     from .linux_extraction_helpers import linux_home_for_user
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from .settings_transformers import MACHINE_SCOPES, transform_settings_to_backend_format
@@ -123,6 +131,7 @@ try:
     from .path_containment import owned_boundary
     from .s3_uploader import compute_payload_hash
     from .hooks_extractor import extract_hooks, hook_files_for, hooks_from_settings, root_owned
+    from .hook_policy import hook_policy_for
     from . import cache as discovery_cache
     from . import mcp_tools_cache
     from .claude_memory_helpers import collect_claude_memories, memory_scan_enabled
@@ -202,7 +211,7 @@ except ImportError:
         VisualStudioMCPConfigExtractorFactory,
         VisualStudioRulesExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import _is_scanning_users_own_home, _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, copilot_xcode_probes, copilot_app_probes, vs_probes, windows_user_path_dirs, install_surface_listing
+    from scripts.coding_discovery_tools.utils import _is_scanning_users_own_home, _windows_process_is_elevated, send_report_to_backend, send_scan_event, silence_sentry_on_this_thread, sentry_silenced, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, copilot_xcode_probes, copilot_app_probes, vs_probes, windows_user_path_dirs, install_surface_listing
     from scripts.coding_discovery_tools.linux_extraction_helpers import linux_home_for_user
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
     from scripts.coding_discovery_tools.settings_transformers import MACHINE_SCOPES, transform_settings_to_backend_format
@@ -215,6 +224,7 @@ except ImportError:
     from scripts.coding_discovery_tools.path_containment import owned_boundary
     from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
     from scripts.coding_discovery_tools.hooks_extractor import extract_hooks, hook_files_for, hooks_from_settings, root_owned
+    from scripts.coding_discovery_tools.hook_policy import hook_policy_for
     from scripts.coding_discovery_tools import cache as discovery_cache
     from scripts.coding_discovery_tools import mcp_tools_cache
     from scripts.coding_discovery_tools.claude_memory_helpers import collect_claude_memories, memory_scan_enabled
@@ -3875,6 +3885,64 @@ def _drain_budget_seconds(run_timeout: Optional[int], elapsed: float) -> float:
     return max(0.0, min(float(DRAIN_BUDGET_SECONDS), (run_timeout - elapsed) / 2))
 
 
+def _report_scan_skipped(args, sentry_ctx: Dict) -> None:
+    """Record a run the lock turned away under its own run_id, so the backend
+    sees a skipped scan rather than none. Best-effort and bounded: it never
+    changes the exit code."""
+    try:
+        system = platform.system()
+        extractor = DeviceIdExtractorFactory.create(system)
+        # Linux may have to make the id; only the lock holder does, so a first run is never split in two.
+        device_id = extractor.extract_device_id(create=False) if system == "Linux" else extractor.extract_device_id()
+        if not device_id:
+            logger.debug("Skipped scan not reported: this device has no id yet")
+            return
+        # This run is redundant (another holds the lock), so a failed send must not page Sentry every run.
+        with sentry_silenced():
+            send_scan_event(
+                args.domain, args.api_key, device_id, str(uuid.uuid4()), "skipped",
+                args.app_name, sentry_context=sentry_ctx, reason=SCAN_SKIPPED_REASON,
+                deadline=time.monotonic() + SCAN_EVENT_SEND_SECONDS,
+            )
+    except Exception as e:
+        logger.debug(f"Could not report the skipped scan: {e}")
+
+
+def _start_scan_heartbeat(send_in_progress: Callable[[float], object]) -> Tuple[threading.Event, threading.Thread]:
+    """Call send_in_progress(deadline) every SCAN_HEARTBEAT_INTERVAL_SECONDS on a
+    daemon thread until the returned Event is set. A failed send is ignored."""
+    stop = threading.Event()
+
+    def _beat() -> None:
+        # A failed beat is only logged: report_to_sentry is not thread-safe.
+        silence_sentry_on_this_thread()
+        while not stop.wait(SCAN_HEARTBEAT_INTERVAL_SECONDS):
+            if stop.is_set():  # the scan ended as this wait timed out: its outcome must be the last event
+                break
+            try:
+                send_in_progress(time.monotonic() + SCAN_EVENT_SEND_SECONDS)
+            except Exception as e:
+                logger.debug(f"Scan heartbeat failed: {e}")
+
+    thread = threading.Thread(target=_beat, daemon=True, name="scan-heartbeat")
+    thread.start()
+    return stop, thread
+
+
+def _stop_scan_heartbeat(heartbeat: Optional[Tuple[threading.Event, threading.Thread]],
+                         wait: bool = True) -> None:
+    """Stop the heartbeat. With ``wait``, also give a send already on the wire up
+    to SCAN_EVENT_SEND_SECONDS to finish first. Best-effort ordering only: an
+    in_progress that lands after the outcome just refreshes last_heartbeat on
+    the backend and never changes the scan's status."""
+    if heartbeat is None:
+        return
+    stop, thread = heartbeat
+    stop.set()
+    if wait and thread is not threading.current_thread():
+        thread.join(timeout=SCAN_EVENT_SEND_SECONDS)
+
+
 def _windows_peak_rss_mb() -> Optional[float]:
     import ctypes
     from ctypes import wintypes
@@ -4037,11 +4105,15 @@ def main():
             step_phases[name] = phase
 
     # Acquire single-flight lock. Another discovery process running means we exit
-    # quietly — hook fire was redundant. Heartbeat thread keeps the lock mtime fresh
-    # so other hooks can detect a zombie (>STALE_LOCK_SECONDS without a tick).
+    # 0 — hook fire was redundant — after recording the skip, so the backend and
+    # setup (which reads the stdout line) can tell it from a run that never came.
+    # Heartbeat thread keeps the lock mtime fresh so other hooks can detect a
+    # zombie (>STALE_LOCK_SECONDS without a tick).
     _lock_status = discovery_cache.acquire_lock()
     if _lock_status == "contended":
         logger.info("Another discovery process is running (lock held); exiting.")
+        print(f"Scan skipped: {SCAN_SKIPPED_REASON}", flush=True)
+        _report_scan_skipped(args, sentry_ctx)
         sys.exit(0)
     _have_lock = (_lock_status == "acquired")
     # Lock is best-effort: if the state dir is unwritable, run lock-less rather than skip the scan.
@@ -4068,6 +4140,8 @@ def main():
         except Exception:
             pass
     _heartbeat_stop = None
+    # The in_progress re-sender (stop Event, thread), once the scan has started.
+    _scan_heartbeat: List = [None]
 
     # --- Self-timeout + termination cleanup (WEB-4755) ---
     # Discovery owns its deadline so it can release its lock and report the run
@@ -4102,6 +4176,8 @@ def main():
         if _cleanup_done[0]:
             return
         _cleanup_done[0] = True
+        # No wait: this report runs on a bounded budget before the process exits.
+        _stop_scan_heartbeat(_scan_heartbeat[0], wait=False)
         if not (device_id and run_id):
             return
         try:
@@ -4445,6 +4521,13 @@ def main():
         else:
             logger.warning("✗ Failed to send scan in_progress event (continuing scan anyway)")
         logger.info("")
+        _scan_heartbeat[0] = _start_scan_heartbeat(
+            lambda deadline: send_scan_event(
+                args.domain, args.api_key, device_id, run_id, "in_progress",
+                args.app_name, sentry_context=sentry_ctx, system_user=system_user,
+                deadline=min(deadline, send_deadline) if send_deadline is not None else deadline,
+            )
+        )
 
         # Detect all unique tools across all users first (to know which tools to process)
         logger.info("Detecting AI tools...")
@@ -4658,6 +4741,11 @@ def main():
                                     memory_fix_files.extend(memory_fix.held_files(user_name, user_home, memories))
                                 except Exception as held_err:
                                     logger.debug(f"    Memory fix file list failed for {user_name}: {held_err}")
+
+                        # Whether an admin policy above ours can stop Unbound's hook (None: can't tell).
+                        hook_policy = hook_policy_for(tool_name, user_home)
+                        if hook_policy is not None:
+                            tool_filtered["hook_policy"] = hook_policy
 
                         # Generate report for this single tool with this user's data
                         # user_name is the home_user (from /Users directory)
@@ -5058,6 +5146,7 @@ def main():
                    if u not in unreadable_users and u not in incomplete_users]
         # The one send a run must not skip -- its manifest is what the backend
         # prunes against -- so it gets the whole budget, tail included.
+        _stop_scan_heartbeat(_scan_heartbeat[0])
         _completed_attempted[0] = True
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
@@ -5145,6 +5234,7 @@ def main():
             _heartbeat_stop.set()
         except Exception:
             pass
+        _stop_scan_heartbeat(_scan_heartbeat[0])
         if _have_lock:
             discovery_cache.release_lock()
         # Scoped to this run: a programmatic caller must not inherit the previous

@@ -2,6 +2,7 @@
 Utility functions shared across the AI tools discovery system
 """
 
+import contextlib
 import copy
 import functools
 import json
@@ -17,6 +18,7 @@ import sqlite3
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 import traceback
 from datetime import datetime, timezone
@@ -1486,17 +1488,18 @@ def send_scan_event(
     deadline: Optional[float] = None,
     failure: Optional[Dict] = None,
     response: Optional[Dict] = None,
+    reason: Optional[str] = None,
     capabilities: Optional[List[str]] = None,
 ) -> Tuple[bool, bool]:
     """
-    Send scan lifecycle event to backend (in_progress, completed, failed).
+    Send scan lifecycle event to backend (in_progress, completed, failed, skipped).
 
     Args:
         backend_url: Backend URL to send the event to
         api_key: API key for authentication
         device_id: Device identifier
         run_id: UUID for this scan run (client-generated)
-        scan_event: Event type - "in_progress", "completed", or "failed"
+        scan_event: Event type - "in_progress", "completed", "failed" or "skipped"
         app_name: Optional application name (e.g., JumpCloud)
         home_user: Optional user context (for user-specific failures)
         scan_error: Optional error data (required when scan_event="failed")
@@ -1510,6 +1513,7 @@ def send_scan_event(
             bound the prune scope.
         failure: Optional dict, as send_report_to_backend describes it.
         response: Optional dict, as send_report_to_backend describes it.
+        reason: Optional text saying why a "skipped" run did not scan.
         capabilities: Optional agent capabilities, e.g. ["memory_fix"]; sent only when non-empty.
 
     Returns:
@@ -1520,6 +1524,9 @@ def send_scan_event(
         "run_id": run_id,
         "scan_event": scan_event,
     }
+
+    if reason:
+        payload["reason"] = reason
 
     # Differentiates a lifecycle-send failure from a per-tool one in the dedup signature.
     sentry_context = dict(sentry_context or {}, scan_event=scan_event)
@@ -3390,6 +3397,27 @@ _sentry_event_count = 0
 _sentry_consecutive_fails = 0
 _sentry_dead_this_run = False
 
+# Threads that may not report: the per-run state above has no lock.
+_sentry_thread_state = threading.local()
+
+
+def silence_sentry_on_this_thread() -> None:
+    """Make report_to_sentry a no-op on the calling thread, for a background
+    thread whose sends can fail (the scan heartbeat)."""
+    _sentry_thread_state.silenced = True
+
+
+@contextlib.contextmanager
+def sentry_silenced():
+    """report_to_sentry is a no-op on this thread inside the block, for a send whose failure is expected."""
+    previous = getattr(_sentry_thread_state, "silenced", False)
+    _sentry_thread_state.silenced = True
+    try:
+        yield
+    finally:
+        _sentry_thread_state.silenced = previous
+
+
 # Held by reference, so the fields main() adds later (device_id, run_id) reach
 # every event without each call site having to thread the context through.
 _sentry_run_context: Dict = {}
@@ -3650,6 +3678,8 @@ def report_to_sentry(
             is still honored (no spam). Reserve for a single terminal event/run.
     """
     try:
+        if getattr(_sentry_thread_state, "silenced", False):
+            return
         dsn = _parse_sentry_dsn(_SENTRY_DSN)
         if not dsn:
             logger.debug("Sentry reporting skipped (no valid DSN configured)")

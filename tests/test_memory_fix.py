@@ -455,6 +455,17 @@ class PollAsksTheBackend(_Files):
         self.assertEqual(len(self.fix_posts()), 3)
         self.assertEqual(counts["fixed"], 1)
 
+    def test_a_span_outside_what_the_agents_own_rules_flag_is_refused_without_touching_the_file(self):
+        text = "never run rm -rf without asking\ntoken " + SECRET_A
+        held = self.candidate("m.md", text)
+        self.answers = [lambda body: {"fixes": [_ready(7, held, [_span(text, "without asking")])]}]
+
+        self.run_fixes([held])
+
+        self.assertEqual(self.result_posts()[0]["results"],
+                         [{"id": 7, "outcome": "failed", "reason": "refused", "token": "tok"}])
+        self.assertEqual((self.helper_calls, Path(held["file_path"]).read_text()), ([], text))
+
     def test_a_result_post_that_fails_is_tried_again(self):
         text = "t " + SECRET_A
         held = self.candidate("m.md", text)

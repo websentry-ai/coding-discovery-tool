@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from .memory_fix_helper import FAILURE_REASONS, MAX_FILE_BYTES, PROTOCOL
+from .memory_secret_rules import find_secrets
 from .rule_read_helpers import _open_checked
 from .s3_uploader import _curl_post_json
 from .utils import clip_to_deadline, curl_kill_grace, normalize_url
@@ -52,6 +53,7 @@ def fixes_pending(scan_start_response: Dict) -> bool:
 
 def helper_command() -> List[str]:
     if getattr(sys, "frozen", False):
+        # Routed to the helper by the binary's entry point, packaging/unbound_discovery_entry.py in the setup repo.
         return [os.path.realpath(sys.executable), "memory-fix"]
     helper = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memory_fix_helper.py")
     return [sys.executable, "-I", helper]
@@ -154,8 +156,19 @@ def held_files(home_user: str, home: Path, memories: Optional[Dict]) -> List[Dic
     return held
 
 
-def _file_sha256(candidate: Dict) -> Optional[str]:
-    """sha256 of the file's bytes through the scan's own safe open, or None when it is not whole strict UTF-8."""
+def _flagged_spans(text: str) -> List[Tuple[int, int]]:
+    """The spans this agent's own secret rules flag in text, with overlapping ones joined."""
+    joined: List[Tuple[int, int]] = []
+    for start, end in sorted((found["start"], found["end"]) for found in find_secrets(text)):
+        if joined and start <= joined[-1][1]:
+            joined[-1] = (joined[-1][0], max(joined[-1][1], end))
+        else:
+            joined.append((start, end))
+    return joined
+
+
+def _file_facts(candidate: Dict) -> Optional[Tuple[str, List[Tuple[int, int]]]]:
+    """(sha256 of the bytes, spans the agent flags) through the scan's safe open; None unless whole strict UTF-8."""
     opened = _open_checked(Path(candidate["file_path"]), Path(candidate["memory_root"]), False)
     if opened is None:
         return None
@@ -171,8 +184,7 @@ def _file_sha256(candidate: Dict) -> Optional[str]:
             data += chunk
         if len(data) > MAX_FILE_BYTES:
             return None
-        data.decode("utf-8", errors="strict")
-        return hashlib.sha256(data).hexdigest()
+        return hashlib.sha256(data).hexdigest(), _flagged_spans(data.decode("utf-8", errors="strict"))
     except (OSError, UnicodeDecodeError):
         return None
     finally:
@@ -242,7 +254,10 @@ def _apply(entry: Dict, answer: Dict, deadline: Optional[float]) -> Optional[Dic
     owner = _home_owner(entry.get("home")) if entry.get("home_user") else None
     if owner is None:
         return None
-    if owner[0] == 0:
+    # The backend may only point at text this agent's own rules flagged, so it can never blank anything else.
+    outside = any(not any(low <= start and end <= high for low, high in entry.get("flagged") or [])
+                  for start, end in spans)
+    if owner[0] == 0 or outside:
         return {"id": fix_id, "outcome": "failed", "reason": "refused", "token": token}
     reply = run_helper({"op": "fix", "file_path": entry["file_path"], "memory_root": entry["memory_root"],
                         "sha256": entry["sha256"], "spans": spans}, *owner, timeout=timeout)
@@ -264,12 +279,12 @@ def _hashed(waiting: Dict[Tuple[str, str], Dict], counts: Counter) -> List[Dict]
     """The waiting files with their current sha256; a file that cannot be hashed is dropped for this run."""
     posted = []
     for key, candidate in list(waiting.items()):
-        digest = _file_sha256(candidate)
-        if digest is None:
+        facts = _file_facts(candidate)
+        if facts is None:
             del waiting[key]
             counts["not_posted"] += 1
         else:
-            posted.append({**candidate, "sha256": digest})
+            posted.append({**candidate, "sha256": facts[0], "flagged": facts[1]})
     return posted
 
 

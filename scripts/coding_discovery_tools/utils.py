@@ -1489,6 +1489,7 @@ def send_scan_event(
     failure: Optional[Dict] = None,
     response: Optional[Dict] = None,
     reason: Optional[str] = None,
+    capabilities: Optional[List[str]] = None,
 ) -> Tuple[bool, bool]:
     """
     Send scan lifecycle event to backend (in_progress, completed, failed, skipped).
@@ -1513,6 +1514,7 @@ def send_scan_event(
         failure: Optional dict, as send_report_to_backend describes it.
         response: Optional dict, as send_report_to_backend describes it.
         reason: Optional text saying why a "skipped" run did not scan.
+        capabilities: Optional agent capabilities, e.g. ["memory_fix"]; sent only when non-empty.
 
     Returns:
         Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
@@ -1546,6 +1548,9 @@ def send_scan_event(
 
     if covered_home_users is not None:
         payload["covered_home_users"] = covered_home_users
+
+    if capabilities:
+        payload["capabilities"] = capabilities
 
     return send_report_to_backend(
         backend_url,

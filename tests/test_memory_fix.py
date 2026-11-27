@@ -103,6 +103,22 @@ class HelperEditsTheFile(_Folder):
         self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o640)
 
 
+    @unittest.skipUnless(sys.platform == "darwin", "ACLs and extended attributes are copied on macOS only")
+    def test_the_acl_and_extended_attributes_are_kept(self):
+        import subprocess
+        text = "token: " + SECRET_A + "\n"
+        path = self.write("MEMORY.md", text.encode())
+        subprocess.run(["/usr/bin/xattr", "-w", "com.unbound.test", "kept", str(path)], check=True)
+        subprocess.run(["/bin/chmod", "+a", "group:staff allow read", str(path)], check=True)
+
+        self.assertEqual(self.fix(path, text.encode(), [_span(text, SECRET_A)]), {"outcome": "fixed"})
+
+        kept = subprocess.run(["/usr/bin/xattr", "-p", "com.unbound.test", str(path)], capture_output=True, text=True)
+        listing = subprocess.run(["/bin/ls", "-le", str(path)], capture_output=True, text=True).stdout
+        self.assertEqual((kept.stdout.strip(), "group:staff allow read" in listing), ("kept", True))
+        self.assertEqual(path.read_bytes(), ("token: " + MARKER + "\n").encode())
+
+
 class HelperRefusesAndLeavesTheFileAlone(_Folder):
 
     def assert_failed(self, answer: dict, reason: str):

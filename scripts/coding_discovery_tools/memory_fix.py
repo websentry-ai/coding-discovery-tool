@@ -295,7 +295,7 @@ def _round(link: _Link, waiting: Dict[Tuple[str, str], Dict], counts: Counter) -
     answers = _placements(link, list(posted.values())) if posted else []
     if answers is None:
         return False
-    results, still_pending = [], set()
+    still_pending = set()
     try:
         for answer in answers:
             try:
@@ -310,8 +310,9 @@ def _round(link: _Link, waiting: Dict[Tuple[str, str], Dict], counts: Counter) -
                 else:
                     result = _apply(posted[key], answer, link.deadline)
                     counts[_tally(result)] += 1
-                    if result:
-                        results.append(result)
+                    # Reported at once, so a later slow post or the deadline cannot leave an edit unreported.
+                    if result and not _post_results(link, [result]):
+                        counts["results_post_failed"] += 1
             except Exception as e:
                 counts["answer_error"] += 1
                 logger.warning(f"Memory fix answer skipped: {type(e).__name__}")
@@ -319,9 +320,6 @@ def _round(link: _Link, waiting: Dict[Tuple[str, str], Dict], counts: Counter) -
         # Only a file the backend called pending is asked about again; any other has no fix waiting on this run.
         for key in [key for key in waiting if key not in still_pending]:
             del waiting[key]
-        # Posted even if an answer went wrong: an edit already made must not go unreported.
-        if not _post_results(link, results):
-            counts["results_post_failed"] += 1
     return True
 
 

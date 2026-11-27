@@ -16,6 +16,7 @@ MAX_REQUEST_BYTES = 1024 * 1024
 FAILURE_REASONS = ("changed", "missing", "too_large", "not_utf8", "refused")
 _SHA256 = re.compile(r"[0-9a-fA-F]{64}")
 _RENAME_SWAP = 0x2  # macOS renameatx_np: exchange the two names in one step
+_COPYFILE_ACL_XATTR = (1 << 0) | (1 << 2)  # macOS fcopyfile: COPYFILE_ACL | COPYFILE_XATTR
 _DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 _READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
 
@@ -138,13 +139,33 @@ def _remove(dir_fd: int, name: str) -> None:
         pass
 
 
-def _write_temp(dir_fd: int, name: str, data: bytes, mode: int) -> str:
-    """A new file beside the original holding data, flushed to disk; returns its name."""
+def _copy_access(dir_fd: int, name: str, to_fd: int, group: int) -> None:
+    """Carries the original's group, ACL and extended attributes onto the new file where the OS can; best effort."""
+    from_fd = None
+    try:
+        os.fchown(to_fd, -1, group)
+    except OSError:
+        pass  # Not a group this user may give the file; it keeps the folder's.
+    try:
+        import ctypes
+        copy = ctypes.CDLL(None, use_errno=True).fcopyfile
+        copy.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+        from_fd = os.open(name, _READ_FLAGS, dir_fd=dir_fd)
+        copy(from_fd, to_fd, None, _COPYFILE_ACL_XATTR)
+    except (ImportError, OSError, AttributeError, TypeError, ValueError):
+        pass  # No such call off macOS; the new file then has the mode only.
+    finally:
+        _close(from_fd)
+
+
+def _write_temp(dir_fd: int, name: str, data: bytes, before: os.stat_result) -> str:
+    """A new file beside the original holding data, with its access settings, flushed to disk; returns its name."""
     temp_name = ".%s.unbound-fix-%s.tmp" % (name, os.urandom(8).hex())
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(temp_name, flags, 0o600, dir_fd=dir_fd)
     try:
-        os.fchmod(fd, mode)
+        os.fchmod(fd, stat.S_IMODE(before.st_mode))
+        _copy_access(dir_fd, name, fd, before.st_gid)
         view = memoryview(data)
         while view:
             view = view[os.write(fd, view):]
@@ -186,7 +207,7 @@ def _put_in_place(dir_fd: int, temp_name: str, name: str, before: os.stat_result
 def _swap_in(dir_fd: int, name: str, data: bytes, before: os.stat_result) -> None:
     """Replaces the file with data by temp file and rename, unless it changed since it was read."""
     try:
-        temp_name = _write_temp(dir_fd, name, data, stat.S_IMODE(before.st_mode))
+        temp_name = _write_temp(dir_fd, name, data, before)
     except OSError as error:
         raise _Failed("refused") from error
     try:

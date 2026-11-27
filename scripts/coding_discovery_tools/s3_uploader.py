@@ -251,7 +251,7 @@ def try_s3_upload(
 # ───────────────────────────────────────────────────────────────────────
 
 def _curl_post_json(url: str, api_key: str, body: Dict, timeout: int,
-                    kill_grace: int = 5):
+                    kill_grace: int = 5, body_on_stdin: bool = False):
     """
     Returns (ok, status_code_or_None, response_body, stderr_or_None).
     `ok` is False when curl itself errored (DNS, connection, SSL).
@@ -269,12 +269,14 @@ def _curl_post_json(url: str, api_key: str, body: Dict, timeout: int,
                 "-H", f"Authorization: Bearer {api_key}",
                 "-H", "Content-Type: application/json",
                 "-H", "User-Agent: AI-Tools-Discovery/1.0",
-                "-d", body_json,
+                # On stdin the body stays out of the process list, which every local user can read.
+                *(("--data-binary", "@-") if body_on_stdin else ("-d", body_json)),
                 "--connect-timeout", str(CONNECT_TIMEOUT_SECONDS),
                 "--max-time", str(timeout),
                 "-w", "\n%{http_code}",
                 url,
             ],
+            input=body_json if body_on_stdin else None,
             capture_output=True,
             text=True,
             timeout=timeout + kill_grace,

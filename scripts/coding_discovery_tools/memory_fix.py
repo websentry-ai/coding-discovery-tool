@@ -28,7 +28,7 @@ REQUEST_TIMEOUT_SECONDS = 30
 HELPER_TIMEOUT_SECONDS = 30
 # The self-test runs before every root scan on macOS, so it gets less time than a fix.
 PING_TIMEOUT_SECONDS = 10
-# Below the backend's 2000, so the hash list sent on curl's command line stays well inside ARG_MAX.
+# Below the backend's cap of 2000 files per post.
 FILES_PER_POST = 500
 RESULTS_PER_POST = 100
 RESULT_POST_TRIES = 3
@@ -187,7 +187,7 @@ def _post_json(link: _Link, path: str, body: Dict) -> Optional[Dict]:
     try:
         ok, status, text, err = _curl_post_json(
             f"{normalize_url(link.domain)}{path}", link.api_key, body, timeout,
-            kill_grace=curl_kill_grace(link.deadline))
+            kill_grace=curl_kill_grace(link.deadline), body_on_stdin=True)
         if not ok or status is None or not 200 <= status < 300:
             logger.warning(f"Memory fix post to {path} failed: status={status} err={err}")
             return None

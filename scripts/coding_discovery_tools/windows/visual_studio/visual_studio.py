@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from ...coding_tool_base import BaseToolDetector
+from ...constants import GITHUB_COPILOT_GROUP_ID
 from ...utils import (
     _listable_state,
     fail_if_anomalous,
@@ -399,6 +400,7 @@ class WindowsVisualStudioDetector(BaseToolDetector):
             # Per-user install_path so a root scan can disown it.
             rows.append({
                 "name": COPILOT_TOOL_NAME,
+                "agent_group_id": GITHUB_COPILOT_GROUP_ID,
                 "version": _version_text(copilot_package.get("version")),
                 "install_path": str(user_instance_dir),
             })

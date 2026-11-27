@@ -34,13 +34,15 @@ class BaseDeviceIdExtractor(ABC):
         Extract unique device identifier.
         
         Returns:
-            Device serial number or hostname as fallback
+            Device serial number
         """
         pass
 
 
 class BaseToolDetector(ABC):
     """Abstract base class for AI tool detection."""
+
+    agent_group_id: Optional[str] = None
 
     @property
     @abstractmethod
@@ -892,6 +894,14 @@ class BaseCursorSettingsExtractor(ABC):
 
     def extract_settings(self) -> Optional[Dict]:
         """Extract Cursor IDE permission settings from SQLite database."""
+        settings_list = self.extract_settings_by_user()
+        if len(settings_list) > 1:
+            logger.warning(f"Found Cursor settings for {len(settings_list)} users, returning first only")
+
+        return settings_list[0] if settings_list else None
+
+    def extract_settings_by_user(self) -> List[Dict]:
+        """One backend-ready record per user that has a Cursor database."""
         settings_list = []
 
         def extract_for_user(user_home: Path) -> None:
@@ -909,11 +919,7 @@ class BaseCursorSettingsExtractor(ABC):
                 logger.error(f"Error extracting Cursor settings from {db_path}: {e}", exc_info=True)
 
         self._scan_users(extract_for_user)
-
-        if len(settings_list) > 1:
-            logger.warning(f"Found Cursor settings for {len(settings_list)} users, returning first only")
-
-        return settings_list[0] if settings_list else None
+        return settings_list
 
     def _filter_raw_settings(self, composer_state: Dict) -> Dict:
         """Filter composerState to only include security-relevant keys."""

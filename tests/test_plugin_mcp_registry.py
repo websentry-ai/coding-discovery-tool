@@ -9,9 +9,11 @@ The live MCP scanner is patched out globally in ``tests/__init__.py``.
 """
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts.coding_discovery_tools.mcp_extraction_helpers import (
     _authoritative_plugin_dirs,
@@ -589,6 +591,86 @@ class TestClaudeExposedServerNames(unittest.TestCase):
             _extract_plugin_mcp_for_dir(plugins_dir, projects)
 
             self.assertEqual(_server_names(projects[0]), {"plugin_p_a_b", "a.b"})
+
+
+class TestOwnerContainment(unittest.TestCase):
+    """Scanning another user's home reads plugin files only from inside that home."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.alice, self.bob = Path(self._tmp.name) / "alice", Path(self._tmp.name) / "bob"
+        self.alice_plugins = self.alice / ".claude" / "plugins"
+        self.bob_plugin = self.bob / ".claude" / "plugins" / "cache" / "mkt" / "bobplug" / "1.0.0"
+        _write_json(self.bob_plugin / ".mcp.json", _server("bob-secret"))
+
+    def _link(self, target: Path, link: Path) -> None:
+        link.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.symlink(target, link)
+        except (OSError, NotImplementedError):
+            self.skipTest("cannot create symlinks here")
+
+    def _scan_alice(self) -> list:
+        projects = []
+        _extract_plugin_mcp_for_dir(self.alice_plugins, projects)
+        return projects
+
+    def test_plugin_folder_linked_into_another_home_is_refused(self):
+        link = self.alice_plugins / "cache" / "mkt" / "aliceplug" / "1.0.0"
+        self._link(self.bob_plugin, link)
+        self.assertEqual(self._scan_alice(), [], "cache fallback")
+        _registry(self.alice_plugins, "aliceplug@mkt", link)
+        self.assertEqual(self._scan_alice(), [], "registry")
+
+    def test_mcp_json_linked_into_another_home_is_refused(self):
+        install_path = self.alice_plugins / "cache" / "mkt" / "aliceplug" / "1.0.0"
+        self._link(self.bob_plugin / ".mcp.json", install_path / ".mcp.json")
+        _registry(self.alice_plugins, "aliceplug@mkt", install_path)
+        self.assertEqual(self._scan_alice(), [])
+
+    def test_plugins_dir_linked_into_another_home_is_refused(self):
+        self._link(self.bob / ".claude" / "plugins", self.alice_plugins)
+        self.assertEqual(self._scan_alice(), [])
+
+    def test_install_path_naming_another_home_is_refused(self):
+        _registry(self.alice_plugins, "aliceplug@mkt", self.bob_plugin)
+        self.assertEqual(self._scan_alice(), [])
+
+    def test_registry_linked_into_another_home_is_not_trusted(self):
+        bob_plugins = self.bob / ".claude" / "plugins"
+        _registry(bob_plugins, "bobplug@mkt", self.bob_plugin)
+        _write_json(self.alice_plugins / "cache" / "mkt" / "aliceplug" / "1.0.0" / ".mcp.json", _server("mine"))
+        self._link(bob_plugins / "installed_plugins.json", self.alice_plugins / "installed_plugins.json")
+        self.assertEqual(_server_names(self._scan_alice()[0]), _exposed("aliceplug", "mine"))
+
+    def test_registry_over_the_plugin_file_limit_is_still_authoritative(self):
+        installed = self.alice_plugins / "cache" / "mkt" / "kept" / "1.0.0"
+        _write_json(installed / ".mcp.json", _server("live"))
+        _write_json(self.alice_plugins / "cache" / "mkt" / "removed" / "1.0.0" / ".mcp.json", _server("leftover"))
+        _registry(self.alice_plugins, "kept@mkt", installed)
+        registry_file = self.alice_plugins / "installed_plugins.json"
+        registry = json.loads(registry_file.read_text(encoding="utf-8"))
+        _write_json(registry_file, {**registry, "pad": "x" * (6 * 1024 * 1024)})
+        self.assertEqual([_server_names(p) for p in self._scan_alice()], [_exposed("kept", "live")])
+
+    def test_oversize_plugin_file_is_skipped(self):
+        install_path = self.alice / "dev" / "plugin"
+        _write_json(install_path / ".mcp.json", {"mcpServers": {"big": {"command": "x" * (6 * 1024 * 1024)}}})
+        _write_json(install_path / "plugin.json", _server("small"))
+        self.assertEqual(set(_plugin_mcp_server_map(install_path)), {"small"})
+
+    def test_contained_and_own_home_scans_report_the_same_for_ordinary_plugins(self):
+        install_path = self.alice / "dev" / "plugin"
+        _write_json(install_path / "config" / "servers.json", _server("linked"))
+        self._link(install_path / "config" / "servers.json", install_path / ".mcp.json")
+        _write_json(install_path / ".claude-plugin" / "plugin.json", _server("inline"))
+        _registry(self.alice_plugins, "plugin@local", install_path)
+        contained = self._scan_alice()
+        with mock.patch.object(Path, "home", return_value=self.alice):
+            own_home = self._scan_alice()
+        self.assertEqual(contained, own_home)
+        self.assertEqual(_server_names(contained[0]), _exposed("plugin", "linked", "inline"))
 
 
 if __name__ == "__main__":

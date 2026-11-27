@@ -18,7 +18,9 @@ Both routing entry points are covered:
 
 import os
 import plistlib
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -165,6 +167,184 @@ class TestCentralCoworkMac(unittest.TestCase):
             result = _detect_claude_cowork(det, self.home)
         self.assertIsNotNone(result)
         self.assertEqual(result["install_path"], str(sdir))
+
+
+@unittest.skipIf(os.name == "nt", "POSIX-only: macOS bundle paths")
+class TestCoworkSessionEvidence(unittest.TestCase):
+    """Claude.app installed somewhere we do not probe, Spotlight finding nothing: a
+    session the app wrote recently is what proves Cowork is in use, through the real
+    detector and the scan's own per-user entry point."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        from scripts.coding_discovery_tools.macos.claude_cowork.claude_cowork import (
+            MacOSClaudeCoworkDetector,
+        )
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name).resolve()
+        self.sessions = self.home / "Library" / "Application Support" / "Claude" / COWORK_SESSIONS_DIR
+        self.sessions.mkdir(parents=True)
+        for target, value in (
+            (f"{_BUNDLE_MOD}.CLAUDE_DESKTOP_APP_PATH", self.home / "absent" / "Claude.app"),
+            (f"{_BUNDLE_MOD}.run_command_status", Mock(return_value=("", True))),
+            (f"{_MOD}.platform.system", Mock(return_value="Darwin")),
+        ):
+            patcher = patch(target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.detector = MacOSClaudeCoworkDetector()
+
+    def _session(self, account="acct-1", age_days=0):
+        org = self.sessions / account / "org-1"
+        (org / "local_abc" / "outputs").mkdir(parents=True)
+        path = org / "local_abc.json"
+        path.write_text("{}")
+        stamp = time.time() - age_days * 86400
+        os.utime(path, (stamp, stamp))
+        return path
+
+    def detect(self):
+        from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user
+        return detect_tool_for_user(self.detector, self.home)
+
+    def test_recent_session_reports_cowork_without_the_bundle(self):
+        self._session()
+        self.assertEqual(self.detect(), {
+            "name": "Claude Cowork", "version": "unknown", "install_path": str(self.sessions),
+        })
+
+    def test_stale_session_is_uninstall_residue(self):
+        self._session(age_days=45)
+        self.assertIsNone(self.detect())
+
+    def test_skills_bundle_alone_is_not_a_session(self):
+        skill = self.sessions / "skills-plugin" / "b1" / "b1" / "skills" / "xlsx" / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("# xlsx")
+        self.assertIsNone(self.detect())
+
+    def test_session_behind_a_redirected_account_dir_is_not_evidence(self):
+        elsewhere = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        org = elsewhere / "org-1"
+        org.mkdir()
+        (org / "local_abc.json").write_text("{}")
+        (self.sessions / "acct-1").symlink_to(elsewhere, target_is_directory=True)
+        self.assertIsNone(self.detect())
+
+    def test_session_behind_a_redirected_ancestor_is_not_evidence(self):
+        other = Path(tempfile.mkdtemp(dir=self.tmp.name)) / "Claude"
+        org = other / COWORK_SESSIONS_DIR / "acct-1" / "org-1"
+        org.mkdir(parents=True)
+        (org / "local_abc.json").write_text("{}")
+        claude = self.sessions.parent
+        self.sessions.rmdir()
+        claude.rmdir()
+        claude.symlink_to(other, target_is_directory=True)
+        self.assertIsNone(self.detect())
+
+    def _unlistable(self, path, mode=0o300):
+        os.chmod(path, mode)
+        self.addCleanup(os.chmod, path, 0o700)
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_unlistable_sessions_in_our_own_home_raise_so_nothing_is_pruned(self):
+        self._session()
+        self._unlistable(self.sessions)
+        self._assert_unknown_raises()
+
+    def _assert_unknown_raises(self):
+        with patch(f"{_UTILS_MOD}._is_scanning_users_own_home", return_value=True):
+            with self.assertRaises(PermissionError):
+                self.detect()
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_unlistable_account_raises_so_nothing_is_pruned(self):
+        self._unlistable(self._session().parent.parent)
+        self._assert_unknown_raises()
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_unlistable_org_raises_so_nothing_is_pruned(self):
+        self._unlistable(self._session().parent)
+        self._assert_unknown_raises()
+
+    # Read without search (0o400): the names list, but nothing under them can be looked at.
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_unsearchable_sessions_dir_raises_so_nothing_is_pruned(self):
+        self._session()
+        self._unlistable(self.sessions, 0o400)
+        self._assert_unknown_raises()
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_unsearchable_account_raises_so_nothing_is_pruned(self):
+        self._unlistable(self._session().parent.parent, 0o400)
+        self._assert_unknown_raises()
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_a_readable_recent_session_wins_over_an_unreadable_sibling(self):
+        self._unlistable(self._session(account="acct-locked").parent)
+        self._session(account="acct-open")
+        self.assertEqual(self.detect()["version"], "unknown")
+
+    def test_a_found_bundle_still_wins(self):
+        self._session()
+        app = self.home / "Applications" / "Claude.app"
+        (app / "Contents").mkdir(parents=True)
+        with (app / "Contents" / "Info.plist").open("wb") as fh:
+            plistlib.dump({"CFBundleShortVersionString": "1.4.2"}, fh)
+        self.assertEqual(self.detect()["version"], "1.4.2")
+
+
+@unittest.skipUnless(sys.platform == "darwin", "drives the real macOS detector set")
+class TestCoworkFallbackReachesTheReport(unittest.TestCase):
+    """The whole per-user pipeline a scan runs — detect, process, build the report —
+    with Claude.app missing: the Cowork row goes out carrying the user's skills."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = Path(self.tmp.name).resolve()
+        self.sessions = self.home / "Library" / "Application Support" / "Claude" / COWORK_SESSIONS_DIR
+        for target, value in (
+            (f"{_BUNDLE_MOD}.CLAUDE_DESKTOP_APP_PATH", self.home / "absent" / "Claude.app"),
+            (f"{_BUNDLE_MOD}.run_command_status", Mock(return_value=("", True))),
+            ("os.environ", {**os.environ, "HOME": str(self.home)}),
+        ):
+            patcher = patch(target, value) if target != "os.environ" else patch.dict(os.environ, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _write(self, path, text, age_days=0):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        stamp = time.time() - age_days * 86400
+        os.utime(path, (stamp, stamp))
+
+    def _cowork_report(self):
+        from scripts.coding_discovery_tools.ai_tools_discovery import AIToolsDetector
+        detector = AIToolsDetector()
+        tools = [t for t in detector.detect_all_tools(user_home=self.home) if t["name"] == "Claude Cowork"]
+        if not tools:
+            return None
+        return detector.generate_single_tool_report(
+            detector.process_single_tool(tools[0]), "dev-1", self.home.name)
+
+    def test_recent_session_sends_cowork_with_its_skills(self):
+        self._write(self.sessions / "acct" / "org" / "local_a.json", "{}")
+        self._write(self.sessions / "skills-plugin" / "b" / "b" / "skills" / "xlsx" / "SKILL.md",
+                    "---\nname: xlsx\n---\nSheets.\n")
+        report = self._cowork_report()
+        self.assertIsNotNone(report)
+        (tool,) = report["tools"]
+        self.assertEqual(tool["version"], "unknown")
+        skills = [s["skill_name"] for p in tool.get("projects", []) for s in p.get("skills", [])]
+        self.assertEqual(skills, ["xlsx"])
+
+    def test_stale_sessions_send_no_cowork_row(self):
+        self._write(self.sessions / "acct" / "org" / "local_a.json", "{}", age_days=40)
+        self._write(self.sessions / "skills-plugin" / "b" / "b" / "skills" / "xlsx" / "SKILL.md", "# xlsx")
+        self.assertIsNone(self._cowork_report())
 
 
 class TestCoworkProbeTelemetry(unittest.TestCase):
@@ -591,6 +771,209 @@ class TestMacOSCoworkDetect(unittest.TestCase):
         app.write_text("stale finder alias")
         with patch(f"{_MAC_MOD}.Path.home", return_value=self.home):
             self.assertIsNone(self.Detector().detect())
+
+
+@unittest.skipIf(os.name == "nt", "POSIX-only: macOS .app bundle path semantics")
+class TestMacOSCoworkDesktopPresence(unittest.TestCase):
+    """No sessions tree (Cowork ran in the cloud): the Claude Desktop presence rule decides."""
+
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        utils_mod.reset_sentry_run_state()
+        self.addCleanup(utils_mod.reset_sentry_run_state)
+        from scripts.coding_discovery_tools.macos.claude_cowork.claude_cowork import MacOSClaudeCoworkDetector
+        from scripts.coding_discovery_tools.macos.claude_desktop.claude_desktop import MacOSClaudeDesktopDetector
+        self.Cowork, self.Desktop = MacOSClaudeCoworkDetector, MacOSClaudeDesktopDetector
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = Path(tmp.name).resolve() / "alice"
+        self.scanner_home = Path(tmp.name).resolve() / "scanner"
+        self.scanner_home.mkdir(parents=True)
+        self.data_dir = self.home / "Library" / "Application Support" / "Claude"
+        for target, value in (
+            (f"{_BUNDLE_MOD}.CLAUDE_DESKTOP_APP_PATH", self.home / "absent" / "Claude.app"),
+            (f"{_BUNDLE_MOD}.run_command_status", Mock(return_value=(None, True))),
+            (f"{_MOD}.platform.system", Mock(return_value="Darwin")),
+            (f"{_MAC_MOD}.Path.home", Mock(return_value=self.scanner_home)),
+        ):
+            patcher = patch(target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _app(self, home=None, version="1.4.2"):
+        plist = (home or self.home) / "Applications" / "Claude.app" / "Contents" / "Info.plist"
+        plist.parent.mkdir(parents=True)
+        with plist.open("wb") as fh:
+            plistlib.dump({"CFBundleShortVersionString": version}, fh)
+
+    def _detect(self, detector_cls=None):
+        from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user
+        return detect_tool_for_user((detector_cls or self.Cowork)(), self.home)
+
+    def _locked(self, path):
+        os.chmod(path, 0o000)
+        self.addCleanup(os.chmod, path, 0o700)
+
+    def test_app_and_data_dir_without_sessions_is_a_row(self):
+        self._app()
+        self.data_dir.mkdir(parents=True)
+        self.assertEqual(self._detect(), {
+            "name": "Claude Cowork", "version": "1.4.2", "install_path": str(self.data_dir),
+        })
+        self.assertIn("data_dir:present", utils_mod.cowork_probes())
+
+    def test_row_matches_the_desktop_row_for_the_same_user(self):
+        self._app()
+        self.data_dir.mkdir(parents=True)
+        cowork, desktop = self._detect(), self._detect(self.Desktop)
+        self.assertEqual((cowork["version"], cowork["install_path"]),
+                         (desktop["version"], desktop["install_path"]))
+
+    def test_os_detect_matches_the_central_path(self):
+        self._app()
+        self.data_dir.mkdir(parents=True)
+        detector = self.Cowork()
+        detector.user_home = self.home
+        self.assertEqual(detector.detect(), self._detect())
+
+    def test_app_never_opened_by_this_user_is_no_row(self):
+        self._app()
+        self.assertIsNone(self._detect())
+        self.assertIn("data_dir:absent", utils_mod.cowork_probes())
+
+    def test_data_dir_left_after_uninstall_is_residue(self):
+        self.data_dir.mkdir(parents=True)
+        self.assertIsNone(self._detect())
+        self.assertIn("bundle:absent", utils_mod.cowork_probes())
+
+    def test_scanner_app_is_not_attributed_to_the_scanned_user(self):
+        self._app(home=self.scanner_home)
+        self.data_dir.mkdir(parents=True)
+        self.assertIsNone(self._detect())
+
+    def test_scanned_users_own_app_counts_under_a_multi_user_scan(self):
+        self._app(version="ALICE-9.9.9")
+        self._app(home=self.scanner_home, version="SCANNER-0.0.1")
+        self.data_dir.mkdir(parents=True)
+        self.assertEqual(self._detect()["version"], "ALICE-9.9.9")
+
+    def test_sessions_tree_keeps_reporting_the_sessions_path(self):
+        self._app()
+        sessions = self.data_dir / COWORK_SESSIONS_DIR
+        sessions.mkdir(parents=True)
+        self.assertEqual(self._detect()["install_path"], str(sessions))
+        self.assertNotIn("data_dir:present", utils_mod.cowork_probes())
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_unreadable_claude_parent_is_unknown_not_absent(self):
+        self._app()
+        self.data_dir.mkdir(parents=True)
+        self._locked(self.data_dir.parent)
+        with patch(f"{_UTILS_MOD}._is_scanning_users_own_home", return_value=True):
+            with self.assertRaises(PermissionError):
+                self._detect()
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_unreadable_data_dir_raises_through_the_desktop_rule(self):
+        from scripts.coding_discovery_tools.user_tool_detector import cowork_from_desktop_presence
+        self._app()
+        self.data_dir.mkdir(parents=True)
+        self._locked(self.data_dir.parent)
+        with patch(f"{_UTILS_MOD}._is_scanning_users_own_home", return_value=True):
+            with self.assertRaises(PermissionError):
+                cowork_from_desktop_presence(self.Cowork(), self.home, self.data_dir)
+        self.assertIn("data_dir:unreadable", utils_mod.cowork_probes())
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_unreadable_data_dir_in_another_users_home_is_no_row_and_no_raise(self):
+        self._app()
+        self.data_dir.mkdir(parents=True)
+        self._locked(self.data_dir.parent)
+        with patch(f"{_UTILS_MOD}._is_scanning_users_own_home", return_value=False), \
+                patch(f"{_UTILS_MOD}._is_root", return_value=False):
+            self.assertIsNone(self._detect())
+
+    @unittest.skipIf(os.name == "nt" or os.geteuid() == 0, "POSIX mode bits, and root ignores them")
+    def test_unreadable_bundle_is_unknown_not_absent(self):
+        self._app()
+        self.data_dir.mkdir(parents=True)
+        self._locked(self.home / "Applications")
+        with patch(f"{_UTILS_MOD}._is_scanning_users_own_home", return_value=True):
+            with self.assertRaises(PermissionError):
+                self._detect()
+        self.assertIn("bundle:unreadable", utils_mod.cowork_probes())
+
+    def test_spotlight_that_could_not_run_is_unknown_not_absent(self):
+        self.data_dir.mkdir(parents=True)
+        with patch(f"{_BUNDLE_MOD}.run_command_status", return_value=(None, False)), \
+                patch(f"{_UTILS_MOD}._is_scanning_users_own_home", return_value=True):
+            with self.assertRaises(PermissionError):
+                self._detect()
+        self.assertIn("bundle:unprobed", utils_mod.cowork_probes())
+
+
+class TestWindowsCoworkDesktopPresence(unittest.TestCase):
+    def setUp(self):
+        utils_mod._SENTRY_DSN = ""
+        from scripts.coding_discovery_tools.windows.claude_cowork.claude_cowork import WindowsClaudeCoworkDetector
+        self.Detector = WindowsClaudeCoworkDetector
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = Path(tmp.name) / "alice"
+        self.scanner_home = Path(tmp.name) / "scanner"
+        self.scanner_home.mkdir(parents=True)
+        self.data_dir = self.home / "AppData" / "Roaming" / "Claude"
+        for target, value in (
+            (f"{_MOD}.platform.system", Mock(return_value="Windows")),
+            (f"{_WIN_MOD}.Path.home", Mock(return_value=self.scanner_home)),
+        ):
+            patcher = patch(target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _install(self, home=None):
+        ((home or self.home) / "AppData" / "Local" / "Programs" / "Claude").mkdir(parents=True)
+
+    def test_install_and_data_dir_without_sessions_is_a_row(self):
+        self._install()
+        self.data_dir.mkdir(parents=True)
+        self.assertEqual(_detect_claude_cowork(self.Detector(), self.home), {
+            "name": "Claude Cowork", "version": None, "install_path": str(self.data_dir),
+        })
+
+    def test_install_without_data_dir_is_no_row(self):
+        self._install()
+        self.assertIsNone(_detect_claude_cowork(self.Detector(), self.home))
+
+    def test_data_dir_without_install_is_residue(self):
+        self.data_dir.mkdir(parents=True)
+        self.assertIsNone(_detect_claude_cowork(self.Detector(), self.home))
+
+    def test_scanner_install_is_not_attributed_to_the_scanned_user(self):
+        self._install(home=self.scanner_home)
+        self.data_dir.mkdir(parents=True)
+        self.assertIsNone(_detect_claude_cowork(self.Detector(), self.home))
+
+    def test_os_detect_uses_the_desktop_rule(self):
+        self._install(home=self.scanner_home)
+        appdata = self.scanner_home / "AppData" / "Roaming"
+        (appdata / "Claude").mkdir(parents=True)
+        with patch.dict(os.environ, {"APPDATA": str(appdata)}):
+            self.assertEqual(self.Detector().detect()["install_path"], str(appdata / "Claude"))
+
+
+class TestLinuxCoworkHasNoDesktopRule(unittest.TestCase):
+    """Linux has no Claude Desktop row, so the sessions tree is still required."""
+
+    def test_install_and_data_dir_without_sessions_is_no_row(self):
+        utils_mod._SENTRY_DSN = ""
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            (home / ".config" / "Claude").mkdir(parents=True)
+            det = _make_detector(install_dir=Path("/opt/Claude"))
+            with patch(f"{_MOD}.platform.system", return_value="Linux"):
+                self.assertIsNone(_detect_claude_cowork(det, home))
+            det._find_install_dir.assert_not_called()
 
 
 if __name__ == "__main__":

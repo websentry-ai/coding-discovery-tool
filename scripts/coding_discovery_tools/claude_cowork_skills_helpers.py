@@ -10,13 +10,17 @@ Stdlib only — this module runs on customer machines and may not have third-
 party packages installed.
 """
 
+import functools
+import json
 import logging
+import os
 import re
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .constants import MAX_CONFIG_FILE_SIZE
+from .path_containment import NotContainedError, open_contained
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +174,51 @@ def is_ephemeral_session_path(md_path: Path) -> bool:
     )
 
 
+# Claude Desktop keeps each marketplace's whole catalog here; installed plugins are
+# copied to cowork_plugins/cache, and the user's own uploads live in this folder.
+COWORK_PLUGINS_DIR = "cowork_plugins"
+MARKETPLACES_DIR = "marketplaces"
+LOCAL_UPLOADS_MARKETPLACE = "local-desktop-app-uploads"
+
+
+@functools.lru_cache(maxsize=64)
+def _recorded_install_dirs(plugins_root: Path) -> Tuple[Path, ...]:
+    """Install dirs installed_plugins.json records, re-rooted under ``plugins_root`` (the
+    app may record its VM's view of the path). Empty when it is missing or unreadable."""
+    registry = plugins_root / "installed_plugins.json"
+    try:
+        plugins = json.loads(registry.read_text(encoding="utf-8")).get("plugins") or {}
+    except (OSError, ValueError, AttributeError):
+        return ()
+    dirs = []
+    for entries in plugins.values() if isinstance(plugins, dict) else []:
+        for entry in entries if isinstance(entries, list) else []:
+            raw = entry.get("installPath") if isinstance(entry, dict) else None
+            parts = [p for p in re.split(r"[\\/]+", raw) if p] if isinstance(raw, str) else []
+            if COWORK_PLUGINS_DIR not in parts:
+                continue
+            tail = parts[len(parts) - parts[::-1].index(COWORK_PLUGINS_DIR):]
+            if tail and not any(p in (".", "..") for p in tail):
+                dirs.append(plugins_root.joinpath(*tail))
+    return tuple(dirs)
+
+
+def is_marketplace_catalog_path(md_path: Path) -> bool:
+    """
+    Return True if the file sits in a Cowork marketplace catalog rather than an
+    installed plugin. The catalog lists every plugin a marketplace offers; only the
+    user's uploads and what installed_plugins.json points at are on the device to use.
+    """
+    parts = md_path.parts
+    for i in range(len(parts) - 2):
+        if parts[i] == COWORK_PLUGINS_DIR and parts[i + 1] == MARKETPLACES_DIR:
+            if parts[i + 2] == LOCAL_UPLOADS_MARKETPLACE:
+                return False
+            recorded = _recorded_install_dirs(Path(*parts[: i + 1]))
+            return not any(d == md_path or d in md_path.parents for d in recorded)
+    return False
+
+
 def is_claude_code_path(md_path: Path) -> bool:
     """
     Return True if the resolved path lives under the user's home-level
@@ -222,7 +271,32 @@ def deduplicate_skills(skills: List[Dict]) -> List[Dict]:
 # Skill dict construction
 # ──────────────────────────────────────────────────────────────────────────────
 
-def build_cowork_skill_dict(md_path: Path, user_home: Optional[Path] = None) -> Optional[Dict]:
+def _read_contained(md_path: Path, boundary_real: str) -> Tuple[Dict, str, bool]:
+    """Metadata and content of ``md_path``, opened only if inside ``boundary_real``.
+
+    Check and open happen in one step (path_containment.open_contained), and
+    everything is read from that fd, so a symlink swapped in after the check
+    cannot redirect the read to another user's file.
+    """
+    fd = open_contained(md_path, boundary_real)
+    try:
+        st = os.fstat(fd)
+        raw = os.read(fd, MAX_CONFIG_FILE_SIZE + 1)
+    finally:
+        os.close(fd)
+    truncated = len(raw) > MAX_CONFIG_FILE_SIZE
+    if truncated:
+        logger.warning(f"Cowork skill file {md_path} exceeds size limit "
+                       f"({st.st_size} > {MAX_CONFIG_FILE_SIZE} bytes). Truncating.")
+    metadata = {
+        "size": st.st_size,
+        "last_modified": datetime.utcfromtimestamp(st.st_mtime).isoformat() + "Z",
+    }
+    return metadata, raw[:MAX_CONFIG_FILE_SIZE].decode("utf-8", errors="replace"), truncated
+
+
+def build_cowork_skill_dict(md_path: Path, user_home: Optional[Path] = None,
+                            boundary_real: Optional[str] = None) -> Optional[Dict]:
     """
     Build a single Cowork skill payload dict from a SKILL.md path.
 
@@ -230,16 +304,25 @@ def build_cowork_skill_dict(md_path: Path, user_home: Optional[Path] = None) -> 
     contract so it routes through the existing ingestion code path
     unchanged. All Cowork skills are reported with ``scope="user"``.
 
+    ``boundary_real``: when set, the file is read only if it really lives
+    inside this real dir, checked and opened in one step.
+
     Returns:
         Skill dict, or ``None`` if the file should be skipped (unreadable,
-        runtime-only name, etc.).
+        runtime-only name, outside the boundary, etc.).
     """
     try:
-        if not md_path.exists() or not md_path.is_file():
-            return None
-
-        metadata = _get_file_metadata(md_path)
-        content, truncated = _read_file_content(md_path, metadata["size"])
+        if boundary_real is not None:
+            try:
+                metadata, content, truncated = _read_contained(md_path, boundary_real)
+            except NotContainedError as e:
+                logger.debug(f"Skipping Cowork skill {md_path}: {e}")
+                return None
+        else:
+            if not md_path.exists() or not md_path.is_file():
+                return None
+            metadata = _get_file_metadata(md_path)
+            content, truncated = _read_file_content(md_path, metadata["size"])
         frontmatter = parse_skill_frontmatter(content) if content else {}
         skill_name = extract_skill_name(md_path, content, frontmatter).strip()
 
@@ -273,6 +356,7 @@ def build_cowork_skill_dict(md_path: Path, user_home: Optional[Path] = None) -> 
 
 # Re-export so callers don't have to reach into constants.
 __all__ = [
+    "is_marketplace_catalog_path",
     "COWORK_SESSIONS_DIR",
     "SKILLS_PLUGIN_DIR",
     "SKILL_FILE_NAME_LOWER",

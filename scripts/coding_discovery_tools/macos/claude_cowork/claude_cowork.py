@@ -11,8 +11,8 @@ to have Cowork installed if BOTH:
     - The on-disk session tree exists at
       ~/Library/Application Support/Claude/local-agent-mode-sessions/
 
-If only the app is present (Cowork never enabled / never used), there is
-nothing to report on so we return None.
+With no sessions tree, the Claude Desktop presence rule decides instead: the
+app bundle is found AND the user's ~/Library/Application Support/Claude/ exists.
 """
 
 import logging
@@ -21,6 +21,7 @@ from typing import Dict, Optional
 
 from ...coding_tool_base import BaseToolDetector
 from ...claude_cowork_skills_helpers import COWORK_SESSIONS_DIR
+from ...user_tool_detector import cowork_from_desktop_presence
 from ...utils import record_cowork_probe
 from ..claude_bundle import claude_bundle_version, resolve_claude_bundle
 
@@ -53,7 +54,8 @@ class MacOSClaudeCoworkDetector(BaseToolDetector):
         return resolve_claude_bundle(self._scan_home(user_home), on_probe=record_cowork_probe)
 
     def detect(self) -> Optional[Dict]:
-        sessions_dir = _get_cowork_sessions_dir(self._scan_home())
+        home = self._scan_home()
+        sessions_dir = _get_cowork_sessions_dir(home)
         try:
             sessions_present = sessions_dir.exists() and sessions_dir.is_dir()
         except OSError as e:
@@ -61,7 +63,7 @@ class MacOSClaudeCoworkDetector(BaseToolDetector):
             return None
 
         if not sessions_present:
-            return None
+            return cowork_from_desktop_presence(self, home, sessions_dir.parent)
         # Reuse the resolved bundle: get_version() with no arg resolves it again,
         # which would run the Spotlight lookup a second time.
         app_install = self._find_install_dir()

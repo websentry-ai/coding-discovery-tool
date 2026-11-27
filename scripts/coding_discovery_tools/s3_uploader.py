@@ -23,7 +23,7 @@ import subprocess
 import tempfile
 from typing import Dict, Optional, Tuple
 
-from .utils import normalize_url
+from .utils import clip_to_deadline, curl_kill_grace, normalize_url
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +58,8 @@ def _strip_ephemeral(tool: Dict) -> Dict:
        order, and MCP server tool order can all flip between scans without any
        content change, busting the hash."""
     cleaned = copy.deepcopy(tool)
+    # Memories carry their own hash, so a memory edit leaves the tool hash alone.
+    cleaned.pop("memories", None)
 
     for plugin in (cleaned.get("plugins") or []):
         if isinstance(plugin, dict):
@@ -108,6 +110,8 @@ def _strip_ephemeral(tool: Dict) -> Dict:
             project["skills"] = _sorted_by(project["skills"], lambda s: s.get("file_path", s.get("file_name", "")))
         if isinstance(project.get("mcpServers"), list):
             project["mcpServers"] = _sorted_by(project["mcpServers"], lambda m: m.get("name", ""))
+        if isinstance(project.get("hooks"), list):
+            project["hooks"] = _sorted_by(project["hooks"], lambda h: (h.get("file_path", ""), h.get("event", ""), h.get("command", "")))
 
     return cleaned
 
@@ -136,6 +140,8 @@ def try_s3_upload(
     api_key: str,
     payload: Dict,
     sentry_context: Optional[Dict] = None,
+    deadline: Optional[float] = None,
+    failure: Optional[Dict] = None,
 ) -> Tuple[bool, bool]:
     """
     Run the 3-step flow. Returns (success, retryable).
@@ -155,8 +161,12 @@ def try_s3_upload(
     if payload.get("run_id"):
         meta_body["run_id"] = payload["run_id"]
 
+    meta_timeout = clip_to_deadline(META_TIMEOUT_SECONDS, deadline)
+    if meta_timeout is None:
+        return False, True
     ok, status, body, err = _curl_post_json(
-        f"{base}{UPLOAD_URL_PATH}", api_key, meta_body, META_TIMEOUT_SECONDS,
+        f"{base}{UPLOAD_URL_PATH}", api_key, meta_body, meta_timeout,
+        kill_grace=curl_kill_grace(deadline),
     )
     if not ok:
         _report_step_failure("upload_url_request", status, body, err, ctx)
@@ -183,7 +193,13 @@ def try_s3_upload(
         logger.warning(f"S3 step 2: failed to serialize payload: {e}")
         return False, True
 
-    ok, status, body, err = _curl_put_to_s3(upload_url, s3_payload_json)
+    upload_timeout = clip_to_deadline(UPLOAD_TIMEOUT_SECONDS, deadline)
+    if upload_timeout is None:
+        return False, True
+    ok, status, body, err = _curl_put_to_s3(
+        upload_url, s3_payload_json, upload_timeout,
+        kill_grace=curl_kill_grace(deadline),
+    )
     if not ok or status is None or not (200 <= status < 300):
         _report_step_failure("s3_put", status, body, err, ctx)
         return False, True
@@ -202,17 +218,28 @@ def try_s3_upload(
         "sentry_metrics": payload.get("sentry_metrics"),
         "tool_name": payload.get("tool_name"),
         "payload_hash": payload.get("payload_hash"),
+        "memories_hash": payload.get("memories_hash"),
     }
     # Strip None values to avoid sending bogus keys.
     notify_body = {k: v for k, v in notify_body.items() if v is not None}
 
+    notify_timeout = clip_to_deadline(META_TIMEOUT_SECONDS, deadline)
+    if notify_timeout is None:
+        return False, True
     ok, status, body, err = _curl_post_json(
-        f"{base}{FROM_S3_PATH}", api_key, notify_body, META_TIMEOUT_SECONDS,
+        f"{base}{FROM_S3_PATH}", api_key, notify_body, notify_timeout,
+        kill_grace=curl_kill_grace(deadline),
     )
     if not ok:
+        if failure is not None:
+            failure["kind"] = "uncertain"
         _report_step_failure("from_s3_request", status, body, err, ctx)
         return False, True
     if not (200 <= status < 300):
+        # A server error after the object is already in S3 may mean the backend
+        # ingested it and then failed to answer. A 4xx means it refused outright.
+        if failure is not None and status and status >= 500:
+            failure["kind"] = "uncertain"
         _report_step_failure("from_s3_request", status, body, None, ctx)
         return False, True
 
@@ -223,7 +250,8 @@ def try_s3_upload(
 # Internal helpers
 # ───────────────────────────────────────────────────────────────────────
 
-def _curl_post_json(url: str, api_key: str, body: Dict, timeout: int):
+def _curl_post_json(url: str, api_key: str, body: Dict, timeout: int,
+                    kill_grace: int = 5, body_on_stdin: bool = False):
     """
     Returns (ok, status_code_or_None, response_body, stderr_or_None).
     `ok` is False when curl itself errored (DNS, connection, SSL).
@@ -241,15 +269,17 @@ def _curl_post_json(url: str, api_key: str, body: Dict, timeout: int):
                 "-H", f"Authorization: Bearer {api_key}",
                 "-H", "Content-Type: application/json",
                 "-H", "User-Agent: AI-Tools-Discovery/1.0",
-                "-d", body_json,
+                # On stdin the body stays out of the process list, which every local user can read.
+                *(("--data-binary", "@-") if body_on_stdin else ("-d", body_json)),
                 "--connect-timeout", str(CONNECT_TIMEOUT_SECONDS),
                 "--max-time", str(timeout),
                 "-w", "\n%{http_code}",
                 url,
             ],
+            input=body_json if body_on_stdin else None,
             capture_output=True,
             text=True,
-            timeout=timeout + 5,
+            timeout=timeout + kill_grace,
         )
     except subprocess.TimeoutExpired:
         return False, None, "", "timeout"
@@ -259,7 +289,9 @@ def _curl_post_json(url: str, api_key: str, body: Dict, timeout: int):
     return _parse_curl(result)
 
 
-def _curl_put_to_s3(upload_url: str, body_json: str):
+def _curl_put_to_s3(upload_url: str, body_json: str,
+                    timeout: int = UPLOAD_TIMEOUT_SECONDS,
+                    kill_grace: int = 5):
     """
     PUT the JSON body to a presigned S3 URL.
     Writes to a temp file first to avoid ARG_MAX exhaustion on large payloads.
@@ -283,13 +315,13 @@ def _curl_put_to_s3(upload_url: str, body_json: str):
                     "-H", "Content-Type: application/json",
                     "--data-binary", f"@{tmp_path}",
                     "--connect-timeout", str(CONNECT_TIMEOUT_SECONDS),
-                    "--max-time", str(UPLOAD_TIMEOUT_SECONDS),
+                    "--max-time", str(timeout),
                     "-w", "\n%{http_code}",
                     upload_url,
                 ],
                 capture_output=True,
                 text=True,
-                timeout=UPLOAD_TIMEOUT_SECONDS + 5,
+                timeout=timeout + kill_grace,
             )
         except subprocess.TimeoutExpired:
             return False, None, "", "timeout"

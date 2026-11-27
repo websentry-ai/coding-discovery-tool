@@ -2,6 +2,7 @@
 Utility functions shared across the AI tools discovery system
 """
 
+import copy
 import functools
 import json
 import logging
@@ -213,9 +214,12 @@ def _resolve_login_shell_tools(user_home: Path) -> Dict[str, str]:
         return {}
 
     # Marker-prefixed so profile banner output cannot be mistaken for a path.
+    # PATH first: when a tool resolves to a shim, that PATH is what gets walked
+    # for the real install -- the scanner's own PATH would name the wrong owner.
     script = "; ".join(
-        f'p=$(command -v {tool} 2>/dev/null) && printf "{_MARKER}%s\\t%s\\n" {tool} "$p"'
-        for tool in LOGIN_SHELL_TOOLS
+        [f'printf "{_MARKER}PATH\\t%s\\n" "$PATH"']
+        + [f'p=$(command -v {tool} 2>/dev/null) && printf "{_MARKER}%s\\t%s\\n" {tool} "$p"'
+           for tool in LOGIN_SHELL_TOOLS]
     )
     try:
         result = subprocess.run(
@@ -228,18 +232,34 @@ def _resolve_login_shell_tools(user_home: Path) -> Dict[str, str]:
         return {}
 
     found: Dict[str, str] = {}
+    user_path = ""
     for line in result.stdout.splitlines():
         if not line.startswith(_MARKER) or "\t" not in line:
             continue
         tool, _, path = line[len(_MARKER):].partition("\t")
+        if tool == "PATH":
+            user_path = path.strip()
+            continue
         resolved = Path(path.strip())
         # The name as given, so a profile cannot rename another binary as a tool.
         if resolved.name != tool:
             logger.debug(f"Login shell answered {tool} with {resolved.name}; ignoring")
             continue
         try:
+            if is_session_temp_path(str(resolved)):
+                # A shim first on the user's PATH hides the real install behind
+                # it, so keep walking that PATH rather than losing the tool.
+                recovered = _next_real_install_on_path(tool, user_path)
+                if not recovered:
+                    logger.debug(f"Login shell answered {tool} with a session shim")
+                    continue
+                resolved = Path(recovered)
+            # Applies to the shell's own answer and to anything the walk found,
+            # so a link inside temp is stored as its target here too.
+            resolved = Path(_stable_path(str(resolved)))
             # Ownership on the target, not the link: the candidate loops reject
-            # another account's install and this must not add it back.
+            # another account's install and this must not add it back. Resolved
+            # after any shim recovery, so it describes what gets stored.
             real = Path(os.path.realpath(str(resolved)))
             if (resolved.is_absolute() and real.is_file() and os.access(str(real), os.X_OK)
                     and machine_global_binary_owned_by_user(real, user_home)):
@@ -556,6 +576,71 @@ def claude_code_sessions_recent(claude_dir: Path,
     return False
 
 
+def _real_subdirs(directory: Path) -> Tuple[List[Path], bool]:
+    """``(subdirectories, unreadable)``: links skipped, and any entry or listing we
+    could not read reported rather than dropped. Never raises."""
+    found, unreadable = [], False
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                try:
+                    os.lstat(entry.path)
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    unreadable = True
+                    continue
+                if not is_symlink_or_junction(entry.path) and entry.is_dir(follow_symlinks=False):
+                    found.append(Path(entry.path))
+    except FileNotFoundError:
+        pass
+    except OSError:
+        unreadable = True
+    return found, unreadable
+
+
+def cowork_sessions_recent(user_home: Path, sessions_dir: Path,
+                           max_age_days: int = SESSION_EVIDENCE_MAX_AGE_DAYS) -> Optional[bool]:
+    """Whether Claude Desktop wrote a Cowork session under ``sessions_dir`` recently;
+    None when a folder or file on the way could not be read, which is not absence.
+
+    ``<account>/<org>/local_<id>.json`` is written by the app for each session, so a
+    fresh one proves Cowork ran even when its bundle is somewhere we do not probe. The
+    sessions tree alone is not evidence: it survives an uninstall.
+    """
+    try:
+        sessions_dir = _descend_without_redirect(user_home, *sessions_dir.relative_to(user_home).parts)
+    except ValueError:
+        return False
+    if sessions_dir is None:
+        return False
+    cutoff = time.time() - (max_age_days * 86400)
+    accounts, unknown = _real_subdirs(sessions_dir)
+    for account in accounts:
+        orgs, denied = _real_subdirs(account)
+        unknown = unknown or denied
+        for org in orgs:
+            try:
+                with os.scandir(org) as entries:
+                    for entry in entries:
+                        if not (entry.name.startswith("local_") and entry.name.endswith(".json")):
+                            continue
+                        try:
+                            st = entry.stat(follow_symlinks=False)
+                        except FileNotFoundError:
+                            continue
+                        except OSError:
+                            unknown = True
+                            continue
+                        if stat.S_ISREG(st.st_mode) and st.st_mtime >= cutoff:
+                            return True
+            except FileNotFoundError:
+                continue
+            except OSError:
+                unknown = True
+    return None if unknown else False
+
+
 def dir_state(path) -> str:
     """``present``, ``absent`` or ``unreadable`` for a directory. Never raises.
 
@@ -836,11 +921,6 @@ def machine_global_binary_owned_by_user(candidate: Path, user_home: Path) -> boo
     if not owned:
         record_rejected_binary(candidate, "owner_mismatch")
     return owned
-
-
-def get_hostname() -> str:
-    """Get the system hostname."""
-    return platform.node()
 
 
 @functools.lru_cache(maxsize=1)
@@ -1403,6 +1483,10 @@ def send_scan_event(
     system_user: Optional[str] = None,
     manifest: Optional[List[Dict]] = None,
     covered_home_users: Optional[List[str]] = None,
+    deadline: Optional[float] = None,
+    failure: Optional[Dict] = None,
+    response: Optional[Dict] = None,
+    capabilities: Optional[List[str]] = None,
 ) -> Tuple[bool, bool]:
     """
     Send scan lifecycle event to backend (in_progress, completed, failed).
@@ -1424,6 +1508,9 @@ def send_scan_event(
             "completed" so the backend set-diffs it to prune the rest.
         covered_home_users: Optional home users covered; sent only on "completed" to
             bound the prune scope.
+        failure: Optional dict, as send_report_to_backend describes it.
+        response: Optional dict, as send_report_to_backend describes it.
+        capabilities: Optional agent capabilities, e.g. ["memory_fix"]; sent only when non-empty.
 
     Returns:
         Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
@@ -1455,26 +1542,74 @@ def send_scan_event(
     if covered_home_users is not None:
         payload["covered_home_users"] = covered_home_users
 
+    if capabilities:
+        payload["capabilities"] = capabilities
+
     return send_report_to_backend(
         backend_url,
         api_key,
         payload,
         app_name,
-        sentry_context
+        sentry_context,
+        deadline=deadline,
+        failure=failure,
+        response=response,
     )
 
+
+# curl exit codes meaning nothing was ever handed to the backend. Anything else
+# reads as "it may have arrived": a redundant upload beats a row left stale.
+# 6/7 never opened a socket; the rest failed the TLS handshake, which happens
+# after the socket opens but before any request is written -- the ordinary
+# outcome on a machine whose proxy presents a CA this host does not trust.
+CURL_NEVER_CONNECTED = frozenset({6, 7, 35, 51, 58, 59, 60, 83})
+
+
+def never_connected(returncode: int, connects: str) -> bool:
+    """Whether the backend was ever handed a request. A dropped packet reports the
+    same timeout as a stalled server, so only the connection count separates
+    those two; a TLS failure has a connection and still sent nothing."""
+    return returncode in CURL_NEVER_CONNECTED or connects == "0"
+
+
+# A host that drops packets rather than refusing them would otherwise hold each
+# attempt for the whole request budget.
+CONNECT_TIMEOUT_SECONDS = 10
+# One Sentry event's own budget when the caller has not given it a tighter one.
+SENTRY_EVENT_TIMEOUT_SECONDS = 3
+# The metrics POST's own budget when the run has not given it a tighter one.
+METRICS_TIMEOUT_SECONDS = 10
 
 MAX_ATTEMPTS = 5
 BACKOFF_BASE_SECONDS = 15
 BACKOFF_CAP_SECONDS = 120
+REQUEST_TIMEOUT_SECONDS = 60
+# How long past its own timeout curl gets before the process gives up on it.
+# Drops to a second inside a deadline, whose tail can be under five.
+CURL_KILL_GRACE_SECONDS = 5
 
 
-def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_name: Optional[str] = None, sentry_context: Optional[Dict] = None) -> Tuple[bool, bool]:
+def clip_to_deadline(timeout: int, deadline: Optional[float]) -> Optional[int]:
+    """A request timeout clipped to what the deadline leaves, or None past it."""
+    if deadline is None:
+        return timeout
+    left = int(deadline - time.monotonic())
+    return min(timeout, left) if left >= 1 else None
+
+
+def curl_kill_grace(deadline: Optional[float]) -> int:
+    """The process-level backstop for one request, kept inside a caller's
+    deadline when there is one."""
+    return 1 if deadline is not None else CURL_KILL_GRACE_SECONDS
+
+
+def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_name: Optional[str] = None, sentry_context: Optional[Dict] = None, deadline: Optional[float] = None, failure: Optional[Dict] = None, stop_if_unreachable: bool = False, response: Optional[Dict] = None) -> Tuple[bool, bool]:
     """
     Send discovery report to backend endpoint using curl with retry logic.
 
     Uses curl subprocess to avoid Zscaler certificate issues with urllib.
-    Retries up to 3 times with exponential backoff (2s, 4s) for retryable errors.
+    Retries up to MAX_ATTEMPTS times for retryable errors, sleeping with
+    equal-jittered exponential backoff (ceilings 15s, 30s, 60s, 120s).
     Non-retryable HTTP errors (400, 401, 403, 404, 405, 422) fail immediately.
 
     For data reports (payloads carrying a non-empty ``tools`` list), tries the
@@ -1489,11 +1624,54 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
         report: Report dictionary to send
         app_name: Optional application name (e.g., JumpCloud) to include in request body
         sentry_context: Optional context dict forwarded to Sentry on failure
+        deadline: Optional time.monotonic() value. No upload or backoff is started
+            past it, and every request's own timeout is clipped to what is left, so
+            a caller working to a budget is never held beyond it by one report.
+        failure: Optional dict the caller owns, whose "kind" records how the send
+            resolved: "delivered" (accepted), "unreachable" (nothing reached the
+            backend), "uncertain" (sent, but no answer came, so it may have
+            landed) or "rejected" (answered and refused). "uncertain" wins over
+            a later attempt, since it cannot be made untrue by one. Its
+            "sending" says whether a request is on the wire right now, which a
+            reader on another thread needs: between attempts the kind describes
+            the send, while during one it describes only the attempt before.
+        stop_if_unreachable: give up on the first failure that never reached the
+            backend, without retrying or sleeping. A caller whose queue is itself
+            the retry gains nothing from a curve that cannot connect.
+        response: Optional dict the caller owns, whose "body" receives the body of
+            an accepted (2xx) answer from the report endpoint.
 
     Returns:
         Tuple of (success, retryable): success=True if sent, retryable=True if caller should queue
     """
     NON_RETRYABLE_CODES = (400, 401, 403, 404, 405, 422)
+    # Too large for THIS endpoint, not a bad report: S3 exists for these bodies.
+    # Retrying cannot help, but discarding loses the only copy.
+    PAYLOAD_TOO_LARGE = 413
+
+    def _left_for_telemetry() -> Optional[float]:
+        """What a failure report may spend: whatever is left of the deadline, so
+        telemetry cannot take the time detection and the completed event need."""
+        if deadline is None:
+            return None
+        return max(0.0, deadline - time.monotonic())
+
+    def _sending(state: bool) -> None:
+        """Whether a request is on the wire. Set around each attempt, because a
+        request that has not resolved may still be being accepted."""
+        if failure is not None:
+            failure["sending"] = state
+
+    def _note(kind: str) -> bool:
+        """Record how this attempt resolved; True means abandon the send now.
+        "uncertain" survives a later refusal, which cannot make it untrue."""
+        if failure is not None:
+            if failure.get("kind") != "uncertain":
+                failure["kind"] = kind
+            # Dropped with the outcome, not before: a reader between the two
+            # would take the previous attempt's for this one's.
+            failure["sending"] = False
+        return stop_if_unreachable and kind == "unreachable"
 
     url = f"{normalize_url(backend_url)}/api/v1/ai-tools/report/"
     ctx = sentry_context or {}
@@ -1506,6 +1684,16 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
     if app_name:
         payload["app_name"] = app_name
 
+    # Skill folders are an add-on: a report too big for the backend goes without them, never not at all.
+    # Done before the hash, so the hash matches what is sent.
+    from . import skill_folder_helpers
+    if isinstance(payload.get("tools"), list) and len(json.dumps(payload)) > skill_folder_helpers.MAX_REPORT_BYTES:
+        payload["tools"] = copy.deepcopy(payload["tools"])
+        dropped = skill_folder_helpers.drop_all_folders(payload)
+        if dropped:
+            logger.warning(f"Report is over {skill_folder_helpers.MAX_REPORT_BYTES // (1024 * 1024)} MB; "
+                           f"sending {dropped} skill(s) as SKILL.md only, without their folders")
+
     # Stamp tool_name + hash atomically; backend uses both to dedup unchanged re-scans.
     from .s3_uploader import compute_payload_hash, should_use_s3, try_s3_upload
     tools = payload.get("tools")
@@ -1516,16 +1704,28 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                 payload_hash = compute_payload_hash(tools[0])
                 payload["tool_name"] = raw_name.strip()
                 payload["payload_hash"] = payload_hash
+                if isinstance(tools[0].get("memories"), dict):
+                    payload["memories_hash"] = tools[0]["memories"].get("hash")
             except Exception as e:
                 # Hash failure should never block the upload — log and proceed.
                 logger.warning(f"Could not compute payload hash, dedup disabled for this report: {e}")
 
+    if deadline is not None and time.monotonic() >= deadline:
+        _note("unreachable")
+        return (False, True)
+
     if should_use_s3(payload):
+        s3_failure = {}
         s3_success, _ = try_s3_upload(
-            backend_url, api_key, payload, sentry_context=ctx,
+            backend_url, api_key, payload, sentry_context=ctx, deadline=deadline,
+            failure=s3_failure,
         )
         if s3_success:
             return (True, False)
+        # A lost answer from the from-s3 notification means the backend may hold
+        # this payload already; the legacy attempts below cannot make that untrue.
+        if s3_failure.get("kind") == "uncertain":
+            _note("uncertain")
         logger.info("S3 upload path failed; falling back to legacy /api/v1/ai-tools/report/")
 
     payload_json = json.dumps(payload)
@@ -1541,7 +1741,8 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
         fd, tmp_path = tempfile.mkstemp(prefix="ai-discovery-payload-", suffix=".json")
     except OSError as e:
         logger.error(f"Could not create temp file for payload: {e}")
-        report_to_sentry(e, {**ctx, "phase": "send_report_tmpfile"}, level="warning")
+        report_to_sentry(e, {**ctx, "phase": "send_report_tmpfile"}, level="warning",
+                         max_seconds=_left_for_telemetry())
         return (False, True)
 
     try:
@@ -1551,7 +1752,14 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
             os.close(fd)
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
+            request_timeout = REQUEST_TIMEOUT_SECONDS
+            if deadline is not None:
+                request_timeout = int(min(request_timeout, deadline - time.monotonic()))
+                if request_timeout < 1:
+                    _note("unreachable")
+                    return (False, True)
             try:
+                _sending(True)
                 result = subprocess.run(
                     [
                         "curl", "-s",
@@ -1560,40 +1768,61 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                         "-H", "Content-Type: application/json",
                         "-H", "User-Agent: AI-Tools-Discovery/1.0",
                         "-d", f"@{tmp_path}",
-                        "--max-time", "60",
-                        "-w", "\n%{http_code}",
+                        "--max-time", str(request_timeout),
+                        "--connect-timeout",
+                        str(min(CONNECT_TIMEOUT_SECONDS, request_timeout)),
+                        "-w", "\n%{num_connects} %{http_code}",
                         url,
                     ],
                     capture_output=True,
                     text=True,
-                    timeout=65,
+                    timeout=request_timeout + curl_kill_grace(deadline),
                 )
 
-                # Parse response: stdout = body + "\n" + http_code
                 lines = result.stdout.rsplit("\n", 1)
-                status_str = lines[-1].strip() if lines else ""
+                connects, _, status_str = (lines[-1] if lines else "").strip().partition(" ")
+                status_str = status_str.strip()
                 response_body = lines[0] if len(lines) > 1 else ""
 
                 if result.returncode != 0 or not status_str.isdigit():
                     # Connection/DNS failure — retryable
                     error_msg = result.stderr.strip() or f"curl exit code {result.returncode}"
                     logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} failed: {error_msg}")
-                    if attempt < MAX_ATTEMPTS:
-                        _backoff(attempt)
+                    give_up = _note(
+                        "unreachable"
+                        if never_connected(result.returncode, connects)
+                        else "uncertain"
+                    )
+                    if not give_up and attempt < MAX_ATTEMPTS and _backoff(attempt, deadline):
                         continue
                     try:
                         raise RuntimeError(error_msg)
                     except RuntimeError as exc:
-                        report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt, "curl_stderr": (result.stderr.strip() or "")[:1024]}, level="warning")
+                        report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt, "curl_stderr": (result.stderr.strip() or "")[:1024]}, level="warning",
+                                         max_seconds=_left_for_telemetry())
                     return (False, True)
 
                 http_code = int(status_str)
 
                 if 200 <= http_code < 300:
+                    _note("delivered")
+                    if response is not None:
+                        response["body"] = response_body
                     return (True, False)
 
                 logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} failed: HTTP {http_code}")
+                _note("rejected")
                 _log_http_error_details(http_code, response_body or None)
+
+                if http_code == PAYLOAD_TOO_LARGE:
+                    # One attempt, not a curve: the same endpoint will refuse the
+                    # same body. Kept queued, per the constant above.
+                    try:
+                        raise RuntimeError(f"HTTP {http_code}: payload too large for the legacy endpoint")
+                    except RuntimeError as exc:
+                        report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt}, level="warning",
+                                         max_seconds=_left_for_telemetry())
+                    return (False, True)
 
                 # Cloudflare 403s with error 1010 are transient rate limits — allow retry
                 is_cloudflare_block = http_code == 403 and response_body and "1010" in response_body
@@ -1604,45 +1833,51 @@ def send_report_to_backend(backend_url: str, api_key: str, report: Dict, app_nam
                             error_detail += f": {response_body[:200]}"
                         raise RuntimeError(error_detail)
                     except RuntimeError as exc:
-                        report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt, "response_body": (response_body or "")[:1024]}, level="warning")
+                        report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt, "response_body": (response_body or "")[:1024]}, level="warning",
+                                         max_seconds=_left_for_telemetry())
                     return (False, False)
 
-                if attempt < MAX_ATTEMPTS:
-                    _backoff(attempt)
-                else:
-                    try:
-                        error_detail = f"HTTP {http_code}"
-                        if response_body:
-                            error_detail += f": {response_body[:200]}"
-                        raise RuntimeError(error_detail)
-                    except RuntimeError as exc:
-                        report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt, "response_body": (response_body or "")[:1024]}, level="warning")
-                    return (False, True)
+                if attempt < MAX_ATTEMPTS and _backoff(attempt, deadline):
+                    continue
+                try:
+                    error_detail = f"HTTP {http_code}"
+                    if response_body:
+                        error_detail += f": {response_body[:200]}"
+                    raise RuntimeError(error_detail)
+                except RuntimeError as exc:
+                    report_to_sentry(exc, {**ctx, "phase": "send_report", "http_code": http_code, "attempt": attempt, "response_body": (response_body or "")[:1024]}, level="warning",
+                                     max_seconds=_left_for_telemetry())
+                return (False, True)
 
             except subprocess.TimeoutExpired:
                 logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} timed out")
-                if attempt < MAX_ATTEMPTS:
-                    _backoff(attempt)
-                else:
-                    try:
-                        raise RuntimeError("curl timeout")
-                    except RuntimeError as exc:
-                        report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
-                    return (False, True)
+                _note("uncertain")
+                if attempt < MAX_ATTEMPTS and _backoff(attempt, deadline):
+                    continue
+                try:
+                    raise RuntimeError("curl timeout")
+                except RuntimeError as exc:
+                    report_to_sentry(exc, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning",
+                                     max_seconds=_left_for_telemetry())
+                return (False, True)
 
             except OSError as e:
                 # curl missing or not executable: local, not transient, so sleeping cannot help.
                 logger.error(f"Cannot execute curl: {e}")
-                report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
+                _note("unreachable")
+                report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning",
+                                 max_seconds=_left_for_telemetry())
                 return (False, True)
 
             except Exception as e:
                 logger.error(f"Attempt {attempt}/{MAX_ATTEMPTS} error: {e}")
-                if attempt < MAX_ATTEMPTS:
-                    _backoff(attempt)
-                else:
-                    report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning")
-                    return (False, True)
+                _note("uncertain")
+                if attempt < MAX_ATTEMPTS and _backoff(attempt, deadline):
+                    continue
+                report_to_sentry(e, {**ctx, "phase": "send_report", "attempt": attempt}, level="warning",
+                                 max_seconds=_left_for_telemetry())
+                return (False, True)
+
 
         return (False, True)
     finally:
@@ -1674,14 +1909,19 @@ def _backoff_seconds(name: str, default: float) -> float:
         return default
 
 
-def _backoff(attempt: int) -> None:
-    """Sleep with equal-jittered exponential backoff; jitter keeps a fleet that failed together from retrying together."""
+def _backoff(attempt: int, deadline: Optional[float] = None) -> bool:
+    """Sleep with equal-jittered exponential backoff; jitter keeps a fleet that failed
+    together from retrying together. False means the deadline left no room to wait."""
     base = _backoff_seconds("AI_DISCOVERY_BACKOFF_BASE_SECONDS", BACKOFF_BASE_SECONDS)
     cap = _backoff_seconds("AI_DISCOVERY_BACKOFF_CAP_SECONDS", BACKOFF_CAP_SECONDS)
     ceiling = min(base * 2 ** (attempt - 1), cap)
     wait = random.uniform(ceiling / 2, ceiling)
+    if deadline is not None and time.monotonic() + wait > deadline:
+        logger.info("  Out of time to retry; leaving this report queued.")
+        return False
     logger.info(f"  Retrying in {wait:.1f}s...")
     time.sleep(wait)
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1716,13 +1956,48 @@ QUEUE_MAX_AGE_SECONDS = 86400  # 24 hours
 MAX_QUEUE_SIZE = 100  # Prevent unbounded growth across successive failures
 
 
-def save_failed_reports(reports: List[Dict]) -> None:
-    """Write failed report envelopes to the queue file, merging with any existing entries."""
+def _report_key(report) -> Optional[str]:
+    """Stable identity for a queued report, for matching it against the queue file."""
+    try:
+        return json.dumps(report, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return None
+
+
+def _without_memories(report: Dict) -> Dict:
+    """A copy of the report whose tools carry no memories block; the report itself is left as it is."""
+    tools = report.get("tools") if isinstance(report, dict) else None
+    if not isinstance(tools, list):
+        return report
+    return {**report, "tools": [
+        {key: value for key, value in tool.items() if key != "memories"} if isinstance(tool, dict) else tool
+        for tool in tools
+    ]}
+
+
+def _queued_at_by_report(envelopes: List[Dict]) -> Dict[str, str]:
+    """Each report's earliest queued_at in the existing queue file."""
+    found: Dict[str, str] = {}
+    for envelope in envelopes:
+        if not isinstance(envelope, dict):
+            continue
+        key = _report_key(envelope.get("report"))
+        queued_at = envelope.get("queued_at")
+        if key and isinstance(queued_at, str) and key not in found:
+            found[key] = queued_at
+    return found
+
+
+def save_failed_reports(reports: List[Dict], replace: bool = False) -> None:
+    """Write report envelopes to the queue, merging unless replace=True, which treats
+    ``reports`` as all that is owed. An entry keeps its queued_at, so it still ages out."""
     try:
         existing = _load_queue_file_safe()
         now_iso = datetime.now(timezone.utc).isoformat()
-        envelopes = existing + [
-            {"report": r, "queued_at": now_iso} for r in reports
+        first_queued = _queued_at_by_report(existing) if replace else {}
+        envelopes = ([] if replace else existing) + [
+            {"report": r, "queued_at": first_queued.get(_report_key(r), now_iso)}
+            for r in map(_without_memories, reports)
         ]
         # Keep only the most recent entries to prevent unbounded growth
         envelopes = envelopes[-MAX_QUEUE_SIZE:]
@@ -1759,7 +2034,15 @@ def load_pending_reports() -> List[Dict]:
 
     now = datetime.now(timezone.utc)
     valid: List[Dict] = []
+    if not isinstance(envelopes, list):
+        logger.warning("Queue file does not hold a list of envelopes; ignoring it")
+        return []
     for envelope in envelopes:
+        # The recovery branch below reads the entry as a mapping, so anything that
+        # is not one has to go before it: raising here aborts the whole scan.
+        if not isinstance(envelope, dict):
+            logger.debug("Discarding malformed queue entry")
+            continue
         try:
             queued_at = datetime.fromisoformat(envelope["queued_at"])
             if (now - queued_at).total_seconds() > QUEUE_MAX_AGE_SECONDS:
@@ -1787,16 +2070,28 @@ def _load_queue_file_safe() -> List[Dict]:
 
 
 def _write_file_secure(path: Path, data: bytes) -> None:
-    """Write data to a file with restricted permissions (0600 on Unix)."""
+    """Write 0600 and swap into place: the watchdog can end the process mid-write,
+    and a half-written queue file loads as nothing, costing the whole backlog."""
     # Ensure the parent exists so a queue-path override with a missing parent
     # doesn't silently drop the write (and lose the failed reports).
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(data)
-    # Restrict permissions to owner-only (rw-------) on Unix systems
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp",
+                               dir=str(path.parent))
     try:
-        path.chmod(0o600)
-    except OSError:
-        pass
+        try:
+            # mkstemp is already 0600; keep it that way through the rename.
+            os.fchmod(fd, 0o600)
+        except (OSError, AttributeError):
+            pass
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -2071,7 +2366,42 @@ def _get_plan_from_credentials_file(user_home: Path) -> Optional[str]:
     return None
 
 
+# Claude reports both Max and Ultra as "max". The usage tier in the account profile
+# (~/.claude.json) says which; any other tier, or none, keeps "max".
+CLAUDE_MAX_TIERS = {"default_claude_max_20x": "ultra", "default_claude_max_5x": "max"}
+CLAUDE_PROFILE_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _claude_max_plan(user_home: Optional[Path]) -> Optional[str]:
+    """Which Max-family plan the account in ``<home>/.claude.json`` is on, as a plan id
+    ("ultra", "max"), or None when the profile can't be read."""
+    if user_home is None:
+        return None
+    home = Path(user_home)
+    raw = _read_own_regular_file(home / ".claude.json", home, CLAUDE_PROFILE_MAX_BYTES)
+    try:
+        account = json.loads(raw).get("oauthAccount") if raw else None
+    except (ValueError, RecursionError, AttributeError):
+        return None
+    tier = account.get("organizationRateLimitTier") if isinstance(account, dict) else None
+    return CLAUDE_MAX_TIERS.get(tier) if isinstance(tier, str) else None
+
+
 def get_claude_subscription_type(
+    username: str,
+    claude_binary: Optional[str] = None,
+    diagnostics: Optional[List[Dict]] = None,
+    user_home: Optional[Path] = None,
+) -> Optional[str]:
+    """Claude Code plan id for ``username``, with "max" refined to the Max-family plan
+    the account is actually on (Max or Ultra). See ``_detect_claude_subscription_type``."""
+    plan = _detect_claude_subscription_type(username, claude_binary, diagnostics, user_home)
+    if plan == "max":
+        plan = _claude_max_plan(user_home) or plan
+    return plan
+
+
+def _detect_claude_subscription_type(
     username: str,
     claude_binary: Optional[str] = None,
     diagnostics: Optional[List[Dict]] = None,
@@ -2436,6 +2766,200 @@ def _is_safe_exec_path(path: str) -> bool:
             target = parent
     except OSError:
         return False
+
+
+# A directory that is named as a shim directory, rather than one that merely
+# contains the letters: a real account was called ``omershimonatzmon``, and a
+# substring test refuses that user's own installs.
+_SHIM_DIR = re.compile(r"^(?:.*[-_.])?shims?$", re.IGNORECASE)
+
+_SESSION_SHIM_UUID = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def is_session_temp_path(path) -> bool:
+    """True when ``path`` is a per-session shim rather than an installation.
+
+    A tool that wraps other tools writes throwaway shims into the temp dir and
+    prepends them to PATH, so a ``which`` lookup answers with the wrapper: an
+    install that never existed, with no version, under a new UUID each session.
+
+    Under a temp dir is necessary but not sufficient -- tests root synthetic
+    filesystems at ``mkdtemp()``, so ``<tmp>/home/alice/...`` is an ordinary
+    fixture. A directory named as a shim directory -- ``shims``, or anything
+    ending ``-shims`` such as cmux's -- or a UUID-named parent is what separates
+    them. Named, not merely containing: a real account is called
+    ``omershimonatzmon``. Ownership says nothing here: a per-user temp dir is mode 700 and so
+    passes ``_is_safe_exec_path``.
+    """
+    if not path:
+        return False
+    try:
+        resolved = os.path.realpath(str(path))
+    except (OSError, ValueError):
+        # Resolution can fail -- a link loop raises on Windows. Resolve the
+        # parent instead, which cannot loop, rather than giving up: otherwise a
+        # shim whose target will not resolve is reported as an install. The
+        # parent has to be resolved too, since the roots are, and a temp dir is
+        # reached through a symlink on macOS and a short name on Windows.
+        try:
+            resolved = os.path.join(
+                os.path.realpath(os.path.dirname(str(path))),
+                os.path.basename(str(path)))
+        except (OSError, ValueError):
+            return False
+
+    if not _under_temp_root(resolved):
+        return False
+
+    parts = resolved.split(os.sep)
+    if any(_SHIM_DIR.match(part) for part in parts):
+        return True
+    return bool(len(parts) >= 2 and _SESSION_SHIM_UUID.match(parts[-2]))
+
+
+def _under_temp_root(resolved: str) -> bool:
+    """True if ``resolved`` -- an already-resolved path -- lies in a temp dir."""
+    roots = []
+    try:
+        roots.append(tempfile.gettempdir())
+    except Exception:
+        pass
+    # TMPDIR is per-user on macOS, so the shared temp dirs are listed too.
+    # _path_within resolves each root, which collapses the macOS /private forms.
+    roots.extend(["/tmp", "/var/tmp", "/var/folders"])
+    return any(_path_within(resolved, root) for root in roots)
+
+
+def _plain_windows_path(target: str) -> str:
+    """``target`` without Windows' extended-length prefix.
+
+    ``os.readlink`` answers with the ``\\\\?\\`` form there. Kept as given it
+    would record one install under two spellings depending on whether it was
+    reached through a link, and it would not match a temp root either.
+    """
+    if target.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + target[8:]
+    if target.startswith("\\\\?\\"):
+        return target[4:]
+    return target
+
+
+def _stable_path(candidate: str) -> str:
+    """``candidate``, or what it points at when it is a link inside a temp dir.
+
+    A wrapper may plant a symlink to the real binary rather than a script. That
+    is not a shim by the rule above -- it resolves outside temp -- but the
+    link's own path goes away with the session, so recording it would report a
+    different install on the next scan.
+
+    Followed one link at a time, and only while the link itself sits in temp.
+    Resolving the whole chain would walk past the install and land on what it
+    points at: a Homebrew or version-manager binary is itself a link into a
+    versioned directory, so the same install would be recorded as
+    ``/opt/homebrew/bin/codex`` when found directly and as
+    ``Caskroom/codex/0.139.0/bin/codex`` when found through a temp link -- two
+    names for one install, and a new one on every upgrade.
+    """
+    try:
+        path = candidate
+        seen = set()
+        while os.path.islink(path):
+            if not _under_temp_root(os.path.realpath(os.path.dirname(path))):
+                break           # the link is an install's own path; keep it
+            target = _plain_windows_path(os.readlink(path))
+            if not os.path.isabs(target):
+                target = os.path.join(os.path.dirname(path), target)
+            target = os.path.normpath(target)
+            if target in seen:  # a loop; nothing stable to report
+                return candidate
+            seen.add(target)
+            path = target
+        return path
+    except (OSError, ValueError):
+        return candidate
+
+
+def _path_within(resolved: str, root: str) -> bool:
+    """True if ``resolved`` is ``root`` or sits beneath it. Never raises.
+
+    Matched against the root both as given and resolved, and without regard to
+    case where the platform ignores it. A path is not always fully resolvable --
+    a link loop leaves a Windows short name in place -- and a short name matches
+    neither the long name a resolved root carries nor the other way around, so
+    one spelling alone lets such a path past.
+    """
+    spellings = [root]
+    try:
+        spellings.append(os.path.realpath(root))
+    except (OSError, ValueError):
+        pass
+    target = os.path.normcase(resolved)
+    for spelling in spellings:
+        prefix = os.path.normcase(spelling).rstrip(os.sep)
+        if not prefix:
+            continue
+        if target == prefix or target.startswith(prefix + os.sep):
+            return True
+    return False
+
+
+def install_from_lookup(found):
+    """The install to report for what a PATH lookup answered, or None.
+
+    Takes the hits in the order the lookup listed them and answers with the
+    first that is not a shim -- ``which`` prints one, ``where`` prints every
+    match. When every hit is a shim the rest of PATH is searched, because a
+    shim prepended to PATH hides a real install further along it and reporting
+    nothing would turn a real install into no install at all.
+
+    Takes the lookup's result rather than making the call, so each detector
+    keeps its own ``which`` -- that call is the seam the detector tests patch.
+    """
+    shim_name = None
+    for line in (found or "").splitlines():
+        candidate = line.strip()
+        if not candidate:
+            continue
+        if not is_session_temp_path(candidate):
+            return _stable_path(candidate)
+        shim_name = shim_name or os.path.basename(candidate)
+    if not shim_name:
+        return None
+    walked = _next_real_install_on_path(shim_name)
+    return _stable_path(walked) if walked else None
+
+
+def _next_real_install_on_path(name, path_env=None) -> Optional[str]:
+    """The first executable ``name`` on ``path_env`` that is not a session shim.
+
+    ``path_env`` defaults to this process's PATH. A root scan must pass the
+    scanned user's own PATH instead, or the scanner's install gets attributed
+    to a user who only has a shim.
+
+    Deliberately not ``_which_no_cwd``: that refuses a group-writable directory,
+    and ``/opt/homebrew/bin`` is group-writable by design, so it would drop the
+    install this is recovering. POSIX-shaped, which is where ``which`` runs.
+    """
+    if not name:
+        return None
+    if path_env is None:
+        path_env = os.environ.get("PATH", "")
+    for entry in path_env.split(os.pathsep):
+        # Absolute only: PATH may hold "." or another relative entry, and a
+        # match found through one would be recorded as a path relative to
+        # wherever the scan happened to be running.
+        if not entry or not os.path.isabs(entry):
+            continue
+        candidate = os.path.join(entry, name)
+        try:
+            if not (os.path.isfile(candidate) and os.access(candidate, os.X_OK)):
+                continue
+        except OSError:
+            continue
+        if not is_session_temp_path(candidate):
+            return candidate
+    return None
 
 
 def _which_no_cwd(name: str) -> Optional[str]:
@@ -2894,7 +3418,7 @@ _vscode_bundles_found = set()
 _VSCODE_BUNDLE_TAIL = frozenset({"extensions", "app", "resources", "contents"})
 
 # Both halves of the Cowork gate return a bare None, so absent, denied and never-installed read alike.
-_COWORK_PROBES_CAP = 6
+_COWORK_PROBES_CAP = 9
 _cowork_probes = set()
 
 # Same for the Xcode gate, plus the agent subfolders that say which extractors are worth building.
@@ -3110,6 +3634,7 @@ def report_to_sentry(
     context: Optional[Dict] = None,
     level: str = "error",
     priority: bool = False,
+    max_seconds: Optional[float] = None,
 ) -> None:
     """Send an event to Sentry using the raw HTTP store endpoint.
 
@@ -3144,6 +3669,14 @@ def report_to_sentry(
         # outage doesn't silently drop the terminal diagnostic.
         if _sentry_dead_this_run and not priority:
             return
+        # Declined before anything is spent: a skip must not record the signature,
+        # charge the per-run cap, or count against the breaker as a transport fault.
+        event_timeout = SENTRY_EVENT_TIMEOUT_SECONDS
+        if max_seconds is not None:
+            event_timeout = int(min(event_timeout, max_seconds))
+            if event_timeout < 1:
+                logger.debug("Sentry event skipped: no time left in the run's budget")
+                return
         # Collapse duplicate events and hard-cap the synchronous curls per run.
         # priority events skip the count cap + breaker (but never dedup) so a
         # terminal once-per-run diagnostic isn't starved by earlier per-tool errors.
@@ -3198,12 +3731,12 @@ def report_to_sentry(
                     "-H", "Content-Type: application/json",
                     "-H", f"X-Sentry-Auth: {sentry_auth}",
                     "-d", f"@{tmp_path}",
-                    "--max-time", "3",
+                    "--max-time", str(event_timeout),
                     dsn["store_url"],
                 ],
                 capture_output=True,
                 text=True,
-                timeout=4,
+                timeout=event_timeout + 1,
             )
             sent_ok = (result.returncode == 0)
             if sent_ok:
@@ -3248,6 +3781,7 @@ def send_discovery_metrics(
     sentry_metrics: Dict[str, Any],
     run_id: Optional[str] = None,
     app_name: Optional[str] = None,
+    deadline: Optional[float] = None,
 ) -> bool:
     """Fire-and-forget POST of client-side timing metrics to the backend.
 
@@ -3283,6 +3817,14 @@ def send_discovery_metrics(
         finally:
             os.close(fd)
 
+        # Immediately before the completed event: unbounded, a slow POST here
+        # spends the run's last seconds and the manifest never goes.
+        max_time = METRICS_TIMEOUT_SECONDS
+        if deadline is not None:
+            max_time = int(min(max_time, deadline - time.monotonic()))
+            if max_time < 1:
+                logger.debug("Discovery metrics skipped: out of run budget")
+                return False
         result = subprocess.run(
             [
                 "curl", "-s",
@@ -3291,13 +3833,13 @@ def send_discovery_metrics(
                 "-H", "Content-Type: application/json",
                 "-H", "User-Agent: AI-Tools-Discovery/1.0",
                 "-d", f"@{tmp_path}",
-                "--max-time", "10",
+                "--max-time", str(max_time),
                 "-w", "\n%{http_code}",
                 url,
             ],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=max_time + curl_kill_grace(deadline),
         )
         status = result.stdout.rsplit("\n", 1)[-1].strip()
         ok = result.returncode == 0 and status.isdigit() and status.startswith("2")

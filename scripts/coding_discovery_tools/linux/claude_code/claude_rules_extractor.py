@@ -2,7 +2,7 @@
 Claude Code rules extraction for Linux.
 
 Same logic as macOS but uses /home/ instead of /Users/ for user directories,
-and skips macOS-only managed-settings paths.
+and reads organization rules from /etc/claude-code/CLAUDE.md.
 """
 
 import logging
@@ -40,18 +40,35 @@ CLAUDE_DIR_NAME = ".claude"
 class LinuxClaudeRulesExtractor(BaseClaudeRulesExtractor):
     """Extractor for Claude Code rules on Linux systems."""
 
+    MANAGED_RULES_PATH = Path("/etc/claude-code/CLAUDE.md")
+
     def extract_all_claude_rules(self) -> Dict:
+        managed_rules: List[Dict] = []
         user_rules: List[Dict] = []
         projects_by_root: Dict[str, List[Dict]] = {}
 
+        self._extract_managed_rules(managed_rules)
         self._extract_user_level_rules(user_rules)
         self._extract_project_level_rules(projects_by_root)
 
         return {
-            "managed_rules": [],
+            "managed_rules": managed_rules,
             "user_rules": user_rules,
             "project_rules": build_rules_project_list(projects_by_root),
         }
+
+    def _extract_managed_rules(self, managed_rules: List[Dict]) -> None:
+        if not self.MANAGED_RULES_PATH.is_file():
+            return
+        try:
+            rule_info = extract_single_rule_file(
+                self.MANAGED_RULES_PATH, find_claude_project_root, scope="managed"
+            )
+            if rule_info:
+                rule_info.pop("project_root", None)
+                managed_rules.append(rule_info)
+        except Exception as e:
+            logger.debug(f"Error extracting managed rules: {e}")
 
     def _extract_user_level_rules(self, user_rules: List[Dict]) -> None:
         def extract_for_user(user_home: Path) -> None:

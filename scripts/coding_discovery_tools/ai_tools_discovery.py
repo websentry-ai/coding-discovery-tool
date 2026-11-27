@@ -7,6 +7,7 @@ on macOS and Windows
 
 import argparse
 import copy
+import functools
 import json
 import logging
 import os
@@ -20,7 +21,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional, Callable
+from typing import Dict, Iterator, List, Optional, Callable, Tuple
 
 # Self-imposed run timeout (seconds). Discovery enforces its OWN deadline rather
 # than only being force-killed by the parent onboard/setup subprocess timeout, so
@@ -30,6 +31,15 @@ from typing import Dict, Iterator, List, Optional, Callable
 # unbound-cli's discover.js (which pass --timeout and use a larger kill backstop).
 # 200 minutes. Pass --timeout <=0 to disable.
 DEFAULT_RUN_TIMEOUT_SECONDS = 12000
+
+# Ceiling on the queue drain (seconds). The queue is its own retry, so a backlog
+# that cannot go now waits for the next run rather than spending this one.
+DRAIN_BUDGET_SECONDS = 600
+# Held back for the end-of-run sends: must fit a whole retry cycle, and never
+# more than a quarter of the budget or a short scan reports nothing it found.
+RUN_SEND_RESERVE_SECONDS = 300
+# Kept clear for the best-effort work that follows the completed event.
+RUN_TAIL_GRACE_SECONDS = 30
 
 SCRIPT_VERSION = "1.2.0"
 
@@ -100,16 +110,28 @@ try:
         VisualStudioMCPConfigExtractorFactory,
         VisualStudioRulesExtractorFactory,
     )
-    from .utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, copilot_xcode_probes, copilot_app_probes, vs_probes, windows_user_path_dirs, install_surface_listing
+    from .utils import _is_scanning_users_own_home, _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, copilot_xcode_probes, copilot_app_probes, vs_probes, windows_user_path_dirs, install_surface_listing
     from .linux_extraction_helpers import linux_home_for_user
     from .logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
-    from .settings_transformers import transform_settings_to_backend_format
+    from .settings_transformers import MACHINE_SCOPES, transform_settings_to_backend_format
     from .user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
+    from .install_path_version import (
+        is_self_updating, is_unknown_version, newest_version, runtime_version, version_from_install_path)
     from .vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
+    from .skill_folder_helpers import attach_skill_folders
     from .plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
+    from .path_containment import owned_boundary
     from .s3_uploader import compute_payload_hash
+    from .hooks_extractor import extract_hooks, hook_files_for, hooks_from_settings, root_owned
     from . import cache as discovery_cache
     from . import mcp_tools_cache
+    from .claude_memory_helpers import collect_claude_memories, memory_scan_enabled
+    from . import memory_fix
+    from .mcp_extraction_helpers import (
+        claude_cli_and_desktop_share_account,
+        extract_claudeai_mcp_servers_with_root_support,
+        get_managed_mcp_path,
+    )
     from .sweep_connectors import run_sweep
 except ImportError:
     # Running as script directly - add parent directory to path
@@ -180,16 +202,28 @@ except ImportError:
         VisualStudioMCPConfigExtractorFactory,
         VisualStudioRulesExtractorFactory,
     )
-    from scripts.coding_discovery_tools.utils import _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, copilot_xcode_probes, copilot_app_probes, vs_probes, windows_user_path_dirs, install_surface_listing
+    from scripts.coding_discovery_tools.utils import _is_scanning_users_own_home, _windows_process_is_elevated, send_report_to_backend, send_scan_event, send_discovery_metrics, get_user_info, get_audit_user, get_all_users_macos, get_all_users_windows, get_all_users_linux, load_pending_reports, save_failed_reports, report_to_sentry, set_sentry_run_context, get_claude_subscription_type, get_cursor_subscription_type, get_auggie_subscription_type, in_container, _get_queue_file_path, tool_config_dirs_present, wsl_distros_present, vscode_editors_present, rejected_binaries, npm_prefix_state, newest_tool_config_dir_age_days, home_is_readable, windows_user_homes, windows_home_for_user, machine_global_binary_owned_by_user, vscode_bundles_probed, vscode_registry_state, cowork_probes, xcode_probes, copilot_xcode_probes, copilot_app_probes, vs_probes, windows_user_path_dirs, install_surface_listing
     from scripts.coding_discovery_tools.linux_extraction_helpers import linux_home_for_user
     from scripts.coding_discovery_tools.logging_helpers import configure_logger, log_rules_details, log_mcp_details, log_settings_details
-    from scripts.coding_discovery_tools.settings_transformers import transform_settings_to_backend_format
+    from scripts.coding_discovery_tools.settings_transformers import MACHINE_SCOPES, transform_settings_to_backend_format
     from scripts.coding_discovery_tools.user_tool_detector import detect_tool_for_user, find_claude_binary_for_user
+    from scripts.coding_discovery_tools.install_path_version import (
+        is_self_updating, is_unknown_version, newest_version, runtime_version, version_from_install_path)
     from scripts.coding_discovery_tools.vscode_extension_helpers import VSCODE_EDITOR_DISPLAY_NAMES
+    from scripts.coding_discovery_tools.skill_folder_helpers import attach_skill_folders
     from scripts.coding_discovery_tools.plugin_extraction_helpers import extract_claude_code_plugins, extract_cursor_plugins, build_plugin_install_path_lookup, extract_plugin_skills
+    from scripts.coding_discovery_tools.path_containment import owned_boundary
     from scripts.coding_discovery_tools.s3_uploader import compute_payload_hash
+    from scripts.coding_discovery_tools.hooks_extractor import extract_hooks, hook_files_for, hooks_from_settings, root_owned
     from scripts.coding_discovery_tools import cache as discovery_cache
     from scripts.coding_discovery_tools import mcp_tools_cache
+    from scripts.coding_discovery_tools.claude_memory_helpers import collect_claude_memories, memory_scan_enabled
+    from scripts.coding_discovery_tools import memory_fix
+    from scripts.coding_discovery_tools.mcp_extraction_helpers import (
+        claude_cli_and_desktop_share_account,
+        extract_claudeai_mcp_servers_with_root_support,
+        get_managed_mcp_path,
+    )
     from scripts.coding_discovery_tools.sweep_connectors import run_sweep
 
 logger = logging.getLogger(__name__)
@@ -212,6 +246,15 @@ _METRIC_NAME_ILLEGAL = re.compile(r"[^a-zA-Z0-9_.\-]")
 # Desktop since the rebrand, but its rules, skills and MCP still key on the
 # original name, so route the new one to it.
 _ROUTING_ALIASES = {"devin desktop": "windsurf"}
+
+
+def _assign_detector_group(detector, tool_info) -> None:
+    """Apply the registered group while preserving explicit results from multi-product detectors."""
+    group_id = getattr(detector, "agent_group_id", None)
+    if not isinstance(group_id, str) or not tool_info:
+        return
+    for result in tool_info if isinstance(tool_info, list) else [tool_info]:
+        result.setdefault("agent_group_id", group_id)
 
 
 def _routing_name(tool) -> str:
@@ -295,6 +338,20 @@ def _home_for_user(user: str):
     return Path.home()
 
 
+@functools.lru_cache(maxsize=1)
+def _scan_user_homes() -> List[Path]:
+    """Every enumerated user's home, as main() scans them; the current user when none are found. Once per run."""
+    if platform.system() == "Darwin":
+        users = get_all_users_macos()
+    elif platform.system() == "Windows":
+        users = get_all_users_windows()
+    elif platform.system() == "Linux":
+        users = get_all_users_linux()
+    else:
+        users = []
+    return [_home_for_user(user) for user in users or [get_user_info()]]  # same fallback as main()
+
+
 def _install_in_another_users_home(tool: Dict, user_home, other_homes) -> bool:
     """Whether this install sits inside a DIFFERENT enumerated user's home."""
     # install_path only: ``tool`` is globally deduped by name+install_path, so its
@@ -310,6 +367,53 @@ def _install_in_another_users_home(tool: Dict, user_home, other_homes) -> bool:
         if theirs and theirs != mine and (path == theirs or path.startswith(theirs + "/")):
             return True
     return False
+
+
+def _is_managed_mcp_project(project: Dict) -> bool:
+    """Whether a project is Claude Code's organization MCP file, which belongs to every user."""
+    managed = get_managed_mcp_path()
+    if not managed or not isinstance(project, dict):
+        return False
+    fold_case = str.lower if os.name == "nt" else str
+    return fold_case(_normalise_path(str(project.get("path") or ""))) == fold_case(_normalise_path(str(managed)))
+
+
+def _under_home(path: str, home: Path) -> bool:
+    """Whether ``path`` is ``home`` or inside it."""
+    fold_case = str.lower if os.name == "nt" else str
+    path_norm, home_norm = (fold_case(_normalise_path(str(value or ""))) for value in (path, home))
+    return bool(path_norm and home_norm) and (path_norm == home_norm or path_norm.startswith(home_norm + "/"))
+
+
+def _permissions_from_own_settings(tool_name: Optional[str], own_settings: List[Dict]) -> Optional[Dict]:
+    """The permissions record built from one user's settings plus machine-managed ones; None when there are none."""
+    if not own_settings:
+        return None
+    try:
+        if (tool_name or "").lower() in ("cursor", "cursor cli"):
+            return own_settings[0]  # already backend-ready, highest precedence first
+        return transform_settings_to_backend_format(own_settings)
+    except Exception as e:
+        logger.warning(f"Could not build per-user permissions for {tool_name}: {e}", exc_info=True)
+        return None
+
+
+def _with_own_permissions(tool: Dict, user_home: Path) -> Dict:
+    """``tool`` without its settings list, permissions rebuilt when some settings are neither this user's nor managed."""
+    all_settings = tool.get('_all_settings')
+    scoped = {key: value for key, value in tool.items() if key != '_all_settings'}
+    if not isinstance(all_settings, list):
+        return scoped
+    own_settings = [s for s in all_settings
+                    if isinstance(s, dict) and ((s.get('scope') or s.get('settings_source')) in MACHINE_SCOPES
+                                                or _under_home(s.get('settings_path', ''), user_home))]
+    if len(own_settings) < len(all_settings):
+        own_permissions = _permissions_from_own_settings(tool.get('name'), own_settings)
+        if own_permissions:
+            scoped['permissions'] = own_permissions
+        else:
+            scoped.pop('permissions', None)
+    return scoped
 
 
 # Mirrors the machine-global candidate lists in user_tool_detector.
@@ -334,6 +438,50 @@ def _machine_global_install_disowned(tool: Dict, user_home) -> bool:
         return False
 
 
+# Unbound's onboarding installs its hook script here, root-owned, in every onboarded user's home.
+_UNBOUND_INSTALL_PATH = re.compile(r"[\\/]\.(claude|cursor|codex|copilot|augment)[\\/]hooks[\\/]unbound\.(py|sh)(?=['\"\s]|$)")
+
+
+def _is_policy_hook(hook: Dict, user_home) -> bool:
+    """Org policy, not the user's own data: a managed hook, or Unbound's root-owned install script (still reported).
+    A user-written file at that path is the user's own and counts as owned data."""
+    if hook.get("scope") == "managed":
+        return True
+    command = hook.get("command") or ""
+    if hook.get("scope") != "user" or user_home is None or any(op in command for op in (";", "&", "|", "`", "$(", "\n")):
+        return False  # a repo hook, or anything chained after Unbound's script, is the user's own
+    # Only `[interpreter] script`: no env prefix, an interpreter from PATH or a system bin dir.
+    program = re.fullmatch(r"""\s*(?:(?:/usr/bin/|/bin/|/usr/local/bin/|/opt/homebrew/bin/)?(?:python3?|bash|sh|zsh)\s+)?"""
+                           r"""['"]?([^\s'"]+)['"]?\s*""", command)
+    if not program:
+        return False
+    # The file that runs (the read script, else the program word) must be the install path itself, root-owned.
+    target = hook.get("script_path") or re.sub(r"^(~|\$HOME|\$\{HOME\})(?=/)", lambda _: str(user_home), program.group(1))
+    match = re.search(_UNBOUND_INSTALL_PATH.pattern + "$", target)
+    if not match:
+        return False
+    expected = Path(str(user_home)) / f".{match.group(1)}" / "hooks" / f"unbound.{match.group(2)}"
+    return Path(os.path.normpath(target)) == expected and root_owned(expected)
+
+
+def _has_owned_projects(tool_filtered: Dict, user_home=None) -> bool:
+    """Whether the user has projects of their own; a row holding only organization policy (managed hooks, rules or
+    MCP, or Unbound's hook) is not theirs."""
+    for project in tool_filtered.get("projects") or []:
+        if not isinstance(project, dict):
+            return True
+        if _is_managed_mcp_project(project):
+            continue
+        hooks = project.get("hooks") or []
+        rules = project.get("rules") or []
+        own_rules = [rule for rule in rules if not (isinstance(rule, dict) and rule.get("scope") == "managed")]
+        other = own_rules or any(value for key, value in project.items() if key not in ("path", "hooks", "rules"))
+        has_policy = bool(hooks) or len(own_rules) < len(rules)
+        if other or not has_policy or not all(_is_policy_hook(hook, user_home) for hook in hooks):
+            return True
+    return False
+
+
 def _copilot_cli_owned_by_user(tool_filtered: Dict, user_home) -> bool:
     """Whether a filtered Copilot CLI tool should be emitted for ``user_home``.
 
@@ -351,7 +499,7 @@ def _copilot_cli_owned_by_user(tool_filtered: Dict, user_home) -> bool:
     owns_install = bool(own_norm) and (
         own_norm == user_norm or own_norm.startswith(user_norm + "/")
     )
-    has_data = bool(tool_filtered.get("projects")) or "permissions" in tool_filtered
+    has_data = _has_owned_projects(tool_filtered, user_home) or "permissions" in tool_filtered
     return owns_install or has_data
 
 
@@ -378,7 +526,7 @@ def _augment_owned_by_user(tool_filtered: Dict, user_home) -> bool:
         own_norm == user_norm or own_norm.startswith(user_norm + "/")
     )
 
-    if bool(tool_filtered.get("projects")):
+    if _has_owned_projects(tool_filtered, user_home):
         return True
 
     # A permissions block survives filtering for this user iff it is managed
@@ -398,10 +546,14 @@ def _has_user_owned_data(tool_name: str, tool_filtered: Dict, user_home) -> bool
         return _copilot_cli_owned_by_user(tool_filtered, user_home)
     if tool_name == "Auggie CLI" or tool_name.lower().startswith("augment ("):
         return _augment_owned_by_user(tool_filtered, user_home)
-    if tool_filtered.get("projects"):
+    if _has_owned_projects(tool_filtered, user_home):
         return True
     perms = tool_filtered.get("permissions")
-    return perms is not None and perms.get("settings_source") != "managed"
+    if perms is None:
+        return False
+    # A merged record is labelled managed once company settings exist; the user's own file still counts.
+    return perms.get("settings_source") != "managed" or any(
+        _under_home(path, user_home) for path in perms.get("contributing_paths") or [])
 
 
 def _decode_project_path(path):
@@ -433,6 +585,106 @@ def _normalize_encoded_paths(obj):
     elif isinstance(obj, list):
         for item in obj:
             _normalize_encoded_paths(item)
+
+
+def _keep_user_version(kept: Dict, detected: Dict, user_home: Path) -> None:
+    """One row per shared install, but a self-updating CLI runs a version per user:
+    record every user's, and the install's own from whichever user could read it."""
+    if is_unknown_version(kept.get("_install_version")):
+        kept["_install_version"] = detected.get("_install_version")
+    kept.setdefault("_version_by_home", {})[str(user_home)] = detected.get("version")
+
+
+def _with_user_version(tool: Dict, report: Dict, user_home: Path) -> Dict:
+    """This user's version, never below the install's (read by any user), and never
+    another user's runtime."""
+    by_home = tool.get("_version_by_home", {})
+    if str(user_home) not in by_home:
+        return report
+    version, install = by_home[str(user_home)], tool.get("_install_version")
+    if not is_unknown_version(install):
+        version = install if is_unknown_version(version) else newest_version(version, install)
+    return {**report, "version": version}
+
+
+def _tool_for_user(detector: "AIToolsDetector", tool: Dict, tool_with_projects: Dict, user_name: str,
+                   user_home: Path, scanned_manifest: set) -> Optional[Dict]:
+    """This user's report view of a processed tool; None (and out of the manifest) when they get no row."""
+    # all_tools is deduped globally; skip users who didn't detect this tool (avoids phantom installs).
+    if _install_key(user_name, tool) not in scanned_manifest:
+        return None
+
+    tool_name = tool.get('name', 'Unknown')
+    tool_filtered = detector.filter_tool_projects_by_user(_with_own_permissions(tool_with_projects, user_home),
+                                                          user_home)
+    tool_filtered = _with_user_version(tool, tool_filtered, user_home)
+
+    # Owned by someone else, unless this user has their own data
+    # for it: Copilot's install_path is the shared binary.
+    if _machine_global_install_disowned(tool, user_home) \
+            and not _has_user_owned_data(tool_name, tool_filtered, user_home):
+        logger.info(
+            f"  Skipping {tool_name} for {user_name}: "
+            f"{tool.get('install_path')!r} is owned by another user "
+            f"and this user has no data for it"
+        )
+        scanned_manifest.discard(_install_key(user_name, tool))
+        return None
+
+    # Ownership gate (Copilot CLI only): suppress a phantom install
+    # row for a user who neither owns the detected ~/.copilot config
+    # dir nor has per-user data. filter_tool_projects_by_user scopes
+    # projects/permissions but never rewrites the paths, so the gate
+    # is needed.
+    if tool_name == "GitHub Copilot CLI" and not _copilot_cli_owned_by_user(tool_filtered, user_home):
+        logger.info(
+            f"  Skipping Copilot CLI for {user_name}: config dir "
+            f"{tool_filtered.get('_config_path') or tool_filtered.get('install_path')!r} "
+            f"not owned by this user and no per-user data"
+        )
+        # Detected globally but not owned by this user -> drop the presence entry.
+        scanned_manifest.discard(_install_key(user_name, tool))
+        return None
+
+    # Ownership gate (Augment surfaces): same ~/.augment-keyed
+    # logic so a non-owner under a root scan doesn't get a
+    # phantom surface row.
+    if (tool_name == "Auggie CLI" or tool_name.lower().startswith("augment (")) \
+            and not _augment_owned_by_user(tool_filtered, user_home):
+        logger.info(
+            f"  Skipping {tool_name} for {user_name}: config dir "
+            f"{tool_filtered.get('_config_path') or tool_filtered.get('install_path')!r} "
+            f"not owned by this user and no per-user data"
+        )
+        # Detected globally but not owned by this user -> drop the presence entry.
+        scanned_manifest.discard(_install_key(user_name, tool))
+        return None
+
+    return tool_filtered
+
+
+def _fill_version_from_install_path(tool_info, user_home: Path) -> None:
+    """Fill an unknown version from the install's files on disk; a self-updating CLI reports what this user runs.
+    Never raises: a missing version must not cost the tool its detection."""
+    for info in tool_info if isinstance(tool_info, list) else [tool_info]:
+        try:
+            if isinstance(info, dict) and info.get("install_path"):
+                path = info["install_path"]
+                install = version_from_install_path(path, user_home)
+                updating = is_self_updating(path, user_home)
+                if install:
+                    info["_install_version"] = install
+                elif not updating and not is_unknown_version(info.get("version")):
+                    info["_install_version"] = info["version"]
+                if updating:
+                    # Only a probe the home's own user ran counts; root or another user probed someone else's binary.
+                    probe = info.get("version") if _is_scanning_users_own_home(user_home) else None
+                    on_disk = runtime_version(path, user_home) or install
+                    info["version"] = newest_version(on_disk, probe) or "Unknown"
+                elif is_unknown_version(info.get("version")) and install:
+                    info["version"] = install
+        except Exception as e:
+            logger.debug(f"Version fallback failed for {info}: {e}")
 
 
 class AIToolsDetector:
@@ -474,7 +726,7 @@ class AIToolsDetector:
             self._claude_settings_extractor = ClaudeSettingsExtractorFactory.create(self.system)
             self._claude_skills_extractor = ClaudeSkillsExtractorFactory.create(self.system)
 
-            # Initialize Claude Cowork extractor (skills only; Cowork has no rules/MCP/settings)
+            # Initialize Claude Cowork extractor (skills only; its claude.ai connectors come from the account)
             self._cowork_skills_extractor = ClaudeCoworkSkillsExtractorFactory.create(self.system)
             
             # Initialize Windsurf extractors
@@ -607,7 +859,7 @@ class AIToolsDetector:
         Extract unique device identifier (serial number).
         
         Returns:
-            Device serial number or hostname as fallback
+            Device serial number
         """
         return self._device_id_extractor.extract_device_id()
 
@@ -634,11 +886,9 @@ class AIToolsDetector:
                     tool_info = detector.detect()
                 
                 if tool_info:
-                    # Handle detectors that return a list (like JetBrains)
-                    if isinstance(tool_info, list):
-                        tools.extend(tool_info)
-                    else:
-                        tools.append(tool_info)
+                    _fill_version_from_install_path(tool_info, user_home or Path.home())
+                    _assign_detector_group(detector, tool_info)
+                    tools.extend(tool_info if isinstance(tool_info, list) else [tool_info])
             except Exception as e:
                 # exc_info keeps the traceback on the machine even when no alert is sent.
                 logger.warning(
@@ -668,7 +918,9 @@ class AIToolsDetector:
         """
         for detector in self._tool_detectors:
             if detector.tool_name.lower() == tool_name.lower():
-                return detector.detect()
+                tool_info = detector.detect()
+                _assign_detector_group(detector, tool_info)
+                return tool_info
         
         logger.warning(f"No detector found for tool: {tool_name}")
         return None
@@ -1240,6 +1492,69 @@ class AIToolsDetector:
 
         return projects_dict
 
+    def _merge_desktop_surface_claudeai_connectors(self, projects_dict: Dict[str, Dict]) -> None:
+        """Add the claude.ai connector project to a desktop-app surface's report."""
+        connector_projects: List[Dict] = []
+        try:
+            extract_claudeai_mcp_servers_with_root_support(
+                connector_projects,
+                home_filter=claude_cli_and_desktop_share_account,
+                include_desktop_sessions=True,
+            )
+            self._merge_mcp_configs_into_projects(connector_projects, projects_dict)
+        except Exception as e:
+            logger.debug(f"Error extracting claude.ai connectors for desktop surface: {e}")
+
+    @staticmethod
+    def _merge_plugin_skills_by_owner(
+        plugin_groups: List[Tuple[str, List[Dict]]],
+        projects_dict: Dict[str, Dict],
+    ) -> int:
+        """File plugin-bundled skills under the home that owns each plugins dir.
+
+        ``plugin_groups`` is a list of ``(owner_home, plugins)`` pairs, one per
+        scanned ``<home>/.<tool>/plugins`` dir. Each skill gets its owner's home
+        as ``project_path`` and is keyed under that home, the same as standalone
+        user skills. Keying by ``Path.home()`` instead breaks root/all-users
+        scans: Path.home() is the scanner's home (e.g. /var/root), so the
+        per-user filter drops every skill.
+
+        For another user's home (a root/all-users scan), a SKILL.md is read only
+        if it really lives inside that home, checked as it is opened.
+        ``installPath`` comes from a user-writable ``installed_plugins.json`` and
+        a user can plant symlinks, so root could otherwise file another user's
+        files under them. Local/directory plugins installed elsewhere in the
+        owner's home still count. For the scanner's own home nothing changes:
+        the scan reads only what this account can already read.
+        Returns the number of skills merged.
+        """
+        merged = 0
+        scanner_home = os.path.realpath(str(Path.home()))
+        for owner_home, group in plugin_groups:
+            if os.path.realpath(owner_home) == scanner_home:
+                boundary_real = None
+            else:
+                boundary_real = owned_boundary(owner_home, owner_home)
+                if boundary_real is None:
+                    continue
+            for skill in extract_plugin_skills(group, boundary_real=boundary_real):
+                skill["project_path"] = owner_home
+                project = projects_dict.setdefault(
+                    owner_home,
+                    {"path": owner_home, "rules": [], "skills": [], "mcpServers": []},
+                )
+                project.setdefault("skills", []).append(skill)
+                merged += 1
+        return merged
+
+    @staticmethod
+    def _owns_plugins_dir(plugins_dir: Path) -> bool:
+        """False when another user's plugins dir really sits outside that user's home."""
+        owner_home = str(plugins_dir.parent.parent)
+        if os.path.realpath(owner_home) == os.path.realpath(str(Path.home())):
+            return True
+        return owned_boundary(owner_home, plugins_dir) is not None
+
     def _extract_and_merge_tool_skills(
         self,
         tool_name: str,
@@ -1381,7 +1696,7 @@ class AIToolsDetector:
         """Record per-flow skills counts for a tool that merges skills INLINE.
 
         The legacy Claude Code / Cursor / Cline / Augment / Copilot CLI / Copilot
-        (VS Code) / Cowork paths predate ``_extract_and_merge_tool_skills`` and merge
+        (VS Code) paths predate ``_extract_and_merge_tool_skills`` and merge
         skills with bespoke code, so they don't go through the shared recorder. This
         puts them in the same metrics payload as the 8 newer tools (same
         ``{user_skills, project_skills, projects}`` shape) so fleet-wide drop
@@ -1749,25 +2064,29 @@ class AIToolsDetector:
                 # Add managed rules to every discovered user home
                 if managed_rules:
                     logger.info(f"  ✓ Found {len(managed_rules)} managed rule(s)")
-                    user_homes = set()
+                    user_homes: Dict[str, str] = {}  # normalised home -> first spelling seen
+
+                    def add_home(home: str) -> None:
+                        key = _normalise_path(home)
+                        user_homes.setdefault(key.lower() if self.system == "Windows" else key, home)
+
                     for rule in user_rules:
                         if rule.get("project_path"):
-                            user_homes.add(rule["project_path"])
+                            add_home(rule["project_path"])
+                    # Every account, not only those with rules of their own: the policy applies to all.
+                    if self.system == "Darwin":
+                        for username in get_all_users_macos():
+                            add_home(str(Path("/Users") / username))
+                    elif self.system == "Windows":
+                        for home in windows_user_homes().values():
+                            add_home(str(home))
+                    elif self.system == "Linux":
+                        for username in get_all_users_linux():
+                            # `root` user's home is /root, not /home/root.
+                            add_home(str(linux_home_for_user(username)))
                     if not user_homes:
-                        if self.system == "Darwin":
-                            for username in get_all_users_macos():
-                                user_homes.add(str(Path("/Users") / username))
-                        elif self.system == "Windows":
-                            for home in windows_user_homes().values():
-                                user_homes.add(str(home))
-                        elif self.system == "Linux":
-                            for username in get_all_users_linux():
-                                # `root` user's home is /root, not /home/root.
-                                home = linux_home_for_user(username)
-                                user_homes.add(str(home))
-                    if not user_homes:
-                        user_homes.add(str(Path.home()))
-                    for user_home in user_homes:
+                        add_home(str(Path.home()))
+                    for user_home in user_homes.values():
                         if user_home not in projects_dict:
                             projects_dict[user_home] = {
                                 "path": user_home,
@@ -1833,13 +2152,19 @@ class AIToolsDetector:
                 except Exception:
                     pass
 
+            # Remember which home each plugins dir belongs to (<home>/.claude/plugins),
+            # so plugin-bundled skills are filed under their owner, not Path.home().
+            plugin_groups = []
             for plugins_dir in plugins_dirs_to_scan:
                 user_plugins = extract_claude_code_plugins(plugins_dir)
                 plugins.extend(user_plugins)
+                if user_plugins and self._owns_plugins_dir(plugins_dir):
+                    plugin_groups.append((str(plugins_dir.parent.parent), user_plugins))
 
             plugin_lookup = build_plugin_install_path_lookup(plugins) if plugins else {}
             if plugins:
                 tool["plugins"] = plugins
+                tool["_plugins_by_owner"] = plugin_groups
                 logger.info(f"  ✓ Found {len(plugins)} plugin(s)")
             else:
                 logger.info("  ℹ No plugins found")
@@ -1847,6 +2172,7 @@ class AIToolsDetector:
             logger.debug(f"Error extracting {tool_name} plugins: {e}")
             report_to_sentry(e, {"phase": "extract", "tool_name": tool_name}, level="warning")
             plugins = []
+            plugin_groups = []
             plugin_lookup = {}
 
         # Extract and merge MCP configs
@@ -1940,17 +2266,11 @@ class AIToolsDetector:
             logger.warning(f"  ⚠ {tool_name} skills extractor not available for this OS")
 
         # Extract skills bundled inside plugins (separate from standalone skills walker)
-        if plugins:
+        if plugin_groups:
             try:
-                plugin_skills = extract_plugin_skills(plugins)
-                if plugin_skills:
-                    logger.info(f"  ✓ Found {len(plugin_skills)} plugin-bundled skill(s)")
-                    user_home = str(Path.home())
-                    if user_home not in projects_dict:
-                        projects_dict[user_home] = {"path": user_home, "rules": [], "skills": [], "mcpServers": []}
-                    if "skills" not in projects_dict[user_home]:
-                        projects_dict[user_home]["skills"] = []
-                    projects_dict[user_home]["skills"].extend(plugin_skills)
+                count = self._merge_plugin_skills_by_owner(plugin_groups, projects_dict)
+                if count:
+                    logger.info(f"  ✓ Found {count} plugin-bundled skill(s)")
             except Exception as e:
                 logger.debug(f"Error extracting plugin-bundled skills: {e}")
                 report_to_sentry(e, {"phase": "extract", "tool_name": tool_name}, level="warning")
@@ -1959,10 +2279,50 @@ class AIToolsDetector:
 
     def _is_project_empty(self, project: Dict) -> bool:
         """Check if a project has no meaningful data (empty mcpServers, rules, and skills)."""
+        if _is_managed_mcp_project(project):
+            return False  # an empty organization MCP file means MCP is turned off
         mcp_servers = project.get("mcpServers", [])
         rules = project.get("rules", [])
         skills = project.get("skills", [])
         return len(mcp_servers) == 0 and len(rules) == 0 and len(skills) == 0
+
+    def _merge_hooks_into_projects(self, tool: Dict, tool_dict: Dict) -> None:
+        """Attach the hooks this tool runs: user and managed hooks under each home, project hooks under the project."""
+        routing = _routing_name(tool)
+        if (routing == "auggie cli" or routing.startswith("augment (")) \
+                and routing != self._canonical_augment_surface_by_config.get(tool.get("_config_path") or ""):
+            return  # non-canonical Augment surfaces share the canonical row's ~/.augment config
+        if routing.startswith("github copilot") and not routing.endswith(" cli") \
+                and (tool.get("name") or "").lower() != self._canonical_vscode_copilot:
+            return  # only the canonical VS Code Copilot row carries the shared ~/.copilot hooks
+        projects_dict = {p.get("path"): p for p in tool_dict.get("projects") or [] if isinstance(p, dict)}
+        project_paths = set(projects_dict)
+        for record in tool.get("_settings") or []:
+            path = Path(record.get("settings_path", "")) if isinstance(record, dict) else Path()
+            if path.parent.name == ".claude" and path.name in ("settings.json", "settings.local.json"):
+                project_paths.add(str(path.parent.parent))
+        if hook_files_for(tool.get("name", "")) is None:
+            return  # this product reads no hook files; skip the home scan
+        homes = _scan_user_homes()
+        hooks_by_project = extract_hooks(tool.get("name", ""), homes, project_paths)
+        plist_hooks = [hook for record in tool.get("_settings") or []
+                       if isinstance(record, dict) and record.get("scope") == "managed_plist"
+                       for hook in hooks_from_settings((record.get("raw_settings") or {}).get("hooks"),
+                                                       record.get("settings_path", "plist"))]
+        for home in homes if plist_hooks else []:
+            hooks_by_project.setdefault(str(home), []).extend(plist_hooks)
+        existing = {_normalise_path(p): p for p in projects_dict if isinstance(p, str)}
+        for project_path, hooks in list(hooks_by_project.items()):
+            key = _normalise_path(project_path)
+            if key not in existing:
+                # A managed-only row is kept: the ownership gates ignore it (_has_owned_projects), so no phantom install.
+                projects_dict[project_path] = {"path": project_path, "rules": [], "skills": [], "mcpServers": []}
+                tool_dict.setdefault("projects", []).append(projects_dict[project_path])
+                existing[key] = project_path
+            projects_dict[existing[key]]["hooks"] = hooks
+        if hooks_by_project:
+            count = sum(len(hooks) for hooks in hooks_by_project.values())
+            logger.info(f"  ✓ Found {count} hook(s) in {len(hooks_by_project)} project(s)")
 
     @staticmethod
     def _deduplicate_project_items(items: List[Dict]) -> List[Dict]:
@@ -2054,8 +2414,9 @@ class AIToolsDetector:
 
         for project in tool.get('projects', []):
             project_path_norm = _normalise_path(project.get('path', ''))
-            # Checking if project path is under the user's home directory
-            if project_path_norm == user_home_norm or project_path_norm.startswith(user_home_norm + '/'):
+            # The user's own projects, plus the organization MCP file every user runs under.
+            if project_path_norm == user_home_norm or project_path_norm.startswith(user_home_norm + '/') \
+                    or _is_managed_mcp_project(project):
                 filtered_projects.append(project)
 
         filtered_tool = tool.copy()
@@ -2075,14 +2436,31 @@ class AIToolsDetector:
             else:
                 filtered_tool.pop('permissions', None)
 
+        plugins_by_owner = filtered_tool.pop('_plugins_by_owner', None)
+        if plugins_by_owner is not None:
+            fold_case = str.lower if self.system == "Windows" else str
+            try:
+                own_plugins = [plugin for owner_home, group in plugins_by_owner
+                               if fold_case(_normalise_path(owner_home)) == fold_case(user_home_norm)
+                               for plugin in group]
+            except (TypeError, ValueError, AttributeError) as e:
+                logger.debug(f"Unreadable plugin owner data, dropping plugins: {e}")
+                own_plugins = []
+            if own_plugins:
+                filtered_tool['plugins'] = own_plugins
+            else:
+                filtered_tool.pop('plugins', None)
+
         if 'permissions' in filtered_tool:
             perms = filtered_tool['permissions']
             settings_source = perms.get('settings_source', '')
-            settings_path_norm = _normalise_path(perms.get('settings_path', ''))
+            fold_case = str.lower if self.system == "Windows" else str
+            settings_path_norm = fold_case(_normalise_path(str(perms.get('settings_path') or '')))
+            home_norm = fold_case(user_home_norm)
             if (settings_source != 'managed'
                     and settings_path_norm
-                    and not (settings_path_norm == user_home_norm
-                             or settings_path_norm.startswith(user_home_norm + '/'))):
+                    and not (settings_path_norm == home_norm
+                             or settings_path_norm.startswith(home_norm + '/'))):
                 del filtered_tool['permissions']
         
         return filtered_tool
@@ -2679,7 +3057,16 @@ class AIToolsDetector:
         one chokepoint that every tool routes through."""
         result = self._process_single_tool_raw(tool)
         if isinstance(result, dict):
+            if "agent_group_id" in tool:
+                result["agent_group_id"] = tool["agent_group_id"]
+            # Decode first so hooks, found by on-disk path, join the existing project rows.
             _normalize_encoded_paths(result)
+            self._merge_hooks_into_projects(tool, result)
+            # Every skill extractor routes through here, so each SKILL.md skill gets its folder's other files.
+            try:
+                attach_skill_folders(result)
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                logger.warning(f"Could not collect skill folders for {tool.get('name')}: {e}")
         return result
 
     def _copilot_xcode_workspace_surfaces(self) -> Dict[str, Dict[str, List]]:
@@ -3026,28 +3413,36 @@ class AIToolsDetector:
                     except Exception:
                         pass
 
+                # (owner home, plugins) per <home>/.cursor/plugins dir, so plugin
+                # skills are filed under their owner, not Path.home().
+                cursor_plugin_groups = []
                 for cursor_plugins_dir in cursor_plugins_dirs:
                     user_plugins = extract_cursor_plugins(cursor_plugins_dir)
                     cursor_plugins.extend(user_plugins)
+                    if user_plugins and self._owns_plugins_dir(cursor_plugins_dir):
+                        cursor_plugin_groups.append((str(cursor_plugins_dir.parent.parent), user_plugins))
 
                 cursor_plugin_lookup = build_plugin_install_path_lookup(cursor_plugins) if cursor_plugins else {}
                 if cursor_plugins:
                     tool["plugins"] = cursor_plugins
+                    tool["_plugins_by_owner"] = cursor_plugin_groups
                     logger.info(f"  ✓ Found {len(cursor_plugins)} Cursor plugin(s)")
                 else:
                     logger.info("  ℹ No Cursor plugins found")
             except Exception as e:
                 logger.debug(f"Error extracting {tool_name} plugins: {e}")
                 cursor_plugins = []
+                cursor_plugin_groups = []
                 cursor_plugin_lookup = {}
 
             logger.info(f"  Extracting {tool_name} settings...")
             if self._cursor_settings_extractor:
                 try:
-                    settings = self._cursor_settings_extractor.extract_settings()
-                    if settings:
+                    settings_by_user = self._cursor_settings_extractor.extract_settings_by_user()
+                    if settings_by_user:
                         logger.info(f"  ✓ Found Cursor settings")
-                        tool["_settings"] = settings
+                        tool["_settings"] = settings_by_user[0]
+                        tool["_all_settings"] = settings_by_user
                     else:
                         logger.info("  ℹ No Cursor settings found")
                 except Exception as e:
@@ -3095,17 +3490,11 @@ class AIToolsDetector:
                 logger.warning(f"  ⚠ {tool_name} skills extractor not available for this OS")
 
             # Extract skills bundled inside Cursor plugins
-            if cursor_plugins:
+            if cursor_plugin_groups:
                 try:
-                    plugin_skills = extract_plugin_skills(cursor_plugins)
-                    if plugin_skills:
-                        logger.info(f"  ✓ Found {len(plugin_skills)} Cursor plugin-bundled skill(s)")
-                        user_home = str(Path.home())
-                        if user_home not in projects_dict:
-                            projects_dict[user_home] = {"path": user_home, "rules": [], "skills": [], "mcpServers": []}
-                        if "skills" not in projects_dict[user_home]:
-                            projects_dict[user_home]["skills"] = []
-                        projects_dict[user_home]["skills"].extend(plugin_skills)
+                    count = self._merge_plugin_skills_by_owner(cursor_plugin_groups, projects_dict)
+                    if count:
+                        logger.info(f"  ✓ Found {count} Cursor plugin-bundled skill(s)")
                 except Exception as e:
                     logger.debug(f"Error extracting Cursor plugin-bundled skills: {e}")
 
@@ -3117,24 +3506,12 @@ class AIToolsDetector:
             logger.info("=" * 70)
             logger.info(f"Processing: {tool.get('name', 'Claude Cowork')}")
             logger.info("=" * 70)
-            logger.info(f"  Extracting Claude Cowork skills...")
-            try:
-                skills_result = self.extract_all_cowork_skills()
-                self._record_skills_result_metric("Claude Cowork", skills_result)
-                user_skills = skills_result.get("user_skills", []) if skills_result else []
-                if user_skills:
-                    logger.info(f"  ✓ Found {len(user_skills)} Claude Cowork skill(s)")
-                    user_home = str(Path.home())
-                    projects_dict[user_home] = {
-                        "path": user_home,
-                        "rules": [],
-                        "skills": user_skills,
-                        "mcpServers": [],
-                    }
-                else:
-                    logger.info("  ℹ No Claude Cowork skills found")
-            except Exception as e:
-                logger.error(f"Error extracting Claude Cowork skills: {e}", exc_info=True)
+            # Shared path: each skill is keyed under its owner's home (its
+            # project_path), so a root/all-users scan keeps every user's skills.
+            self._extract_and_merge_tool_skills(
+                "Claude Cowork", self._cowork_skills_extractor, self.extract_all_cowork_skills, projects_dict
+            )
+            self._merge_desktop_surface_claudeai_connectors(projects_dict)
 
         elif tool_name == "windsurf":
             projects_dict = self._process_tool_with_rules_and_mcp(
@@ -3214,6 +3591,7 @@ class AIToolsDetector:
                 self._claude_desktop_mcp_extractor,
                 list
             )
+            self._merge_desktop_surface_claudeai_connectors(projects_dict)
 
         elif tool_name == "antigravity":
             projects_dict = self._process_tool_with_rules_and_mcp(
@@ -3373,6 +3751,9 @@ class AIToolsDetector:
             tool_dict["plugins"] = tool["plugins"]
             logger.info(f"  ✓ Added {len(tool['plugins'])} plugin(s) to {tool_name} report")
 
+        if "_plugins_by_owner" in tool:
+            tool_dict["_plugins_by_owner"] = tool["_plugins_by_owner"]
+
         if "_ide_folder" in tool:
             tool_dict["_ide_folder"] = tool["_ide_folder"]
         if "_config_path" in tool:
@@ -3402,6 +3783,7 @@ class AIToolsDetector:
 
                 if permissions:
                     tool_dict["permissions"] = permissions
+                    tool_dict["_all_settings"] = tool.get("_all_settings", tool["_settings"])
                     logger.info(f"  ✓ Added permissions to {tool_name} report")
                     detail_logger.info(f"  Permissions keys: {list(permissions.keys())}")
                 else:
@@ -3469,6 +3851,80 @@ class AIToolsDetector:
             "device_discovery_id": device_id,
             "tools": tools_with_projects
         }
+
+
+def _report_identity(report) -> Optional[tuple]:
+    """The (home_user, tool) a single-tool report describes, or None if it is not one."""
+    tools = report.get("tools") if isinstance(report, dict) else None
+    if not isinstance(tools, list) or len(tools) != 1 or not isinstance(tools[0], dict):
+        return None
+    return (report.get("home_user"), tools[0].get("name"))
+
+
+def _drop_superseded(queued: List[Dict], reported_pairs: set) -> List[Dict]:
+    """Queued reports for pairs no fresher report has gone out for. Sending one
+    behind a fresher report would overwrite it."""
+    return [r for r in queued if _report_identity(r) not in reported_pairs]
+
+
+def _drain_budget_seconds(run_timeout: Optional[int], elapsed: float) -> float:
+    """Seconds the queue drain may spend: its own ceiling, and never more than half
+    of what the run has left, since detecting tools is what the run is for."""
+    if not run_timeout or run_timeout <= 0:
+        return float(DRAIN_BUDGET_SECONDS)
+    return max(0.0, min(float(DRAIN_BUDGET_SECONDS), (run_timeout - elapsed) / 2))
+
+
+def _windows_peak_rss_mb() -> Optional[float]:
+    import ctypes
+    from ctypes import wintypes
+
+    class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.K32GetProcessMemoryInfo.argtypes = (
+        wintypes.HANDLE, ctypes.POINTER(PROCESS_MEMORY_COUNTERS), wintypes.DWORD)
+    kernel32.K32GetProcessMemoryInfo.restype = wintypes.BOOL
+    counters = PROCESS_MEMORY_COUNTERS()
+    counters.cb = ctypes.sizeof(PROCESS_MEMORY_COUNTERS)
+    if not kernel32.K32GetProcessMemoryInfo(
+            kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb):
+        return None
+    return round(counters.PeakWorkingSetSize / (1024 * 1024), 1)
+
+
+def _process_usage() -> Dict[str, Optional[float]]:
+    usage: Dict[str, Optional[float]] = {
+        "total_cpu_ms": None, "children_cpu_ms": None, "peak_rss_mb": None,
+    }
+    try:
+        usage["total_cpu_ms"] = round(time.process_time() * 1000)
+        if platform.system() == "Windows":
+            usage["peak_rss_mb"] = _windows_peak_rss_mb()
+        else:
+            import resource
+            children = resource.getrusage(resource.RUSAGE_CHILDREN)
+            usage["children_cpu_ms"] = round((children.ru_utime + children.ru_stime) * 1000)
+            # ru_maxrss is bytes on macOS but KiB on Linux.
+            rss_unit = 1024 * 1024 if sys.platform == "darwin" else 1024
+            usage["peak_rss_mb"] = round(
+                resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / rss_unit, 1)
+    except Exception as e:
+        logger.debug(f"Collecting process usage failed: {e}")
+    return usage
 
 
 def main():
@@ -3556,22 +4012,27 @@ def main():
 
     # Client-side timing metrics, forwarded to backend once at end of run.
     # Backend (webapp.services.discovery_metrics_service) emits each step as a
-    # `discovery.step.<name>` distribution; there is no name allowlist, but the
-    # name must match Sentry's metric-key pattern [a-zA-Z_][a-zA-Z0-9_.\-]*.
+    # `discovery.step.<name>` distribution; names outside its ALLOWED_STEP_NAMES
+    # allowlist are emitted as `unknown_step`, so a new step needs a backend change.
     # Each step is tagged with a phase (detect|process|send|queue) so Sentry can
     # group leaves into broader buckets via the `phase` attribute.
     t_start = time.monotonic()
     step_durations_ms: Dict[str, float] = {}
+    step_cpu_ms: Dict[str, float] = {}
     step_phases: Dict[str, str] = {}
 
     @contextmanager
     def time_step(name: str, phase: str) -> Iterator[None]:
         _t = time.monotonic()
+        _cpu = time.process_time()
         try:
             yield
         finally:
             step_durations_ms[name] = (
                 step_durations_ms.get(name, 0.0) + (time.monotonic() - _t) * 1000.0
+            )
+            step_cpu_ms[name] = (
+                step_cpu_ms.get(name, 0.0) + (time.process_time() - _cpu) * 1000.0
             )
             step_phases[name] = phase
 
@@ -3620,12 +4081,21 @@ def main():
     # of one idempotent "failed" event.
     _cleanup_done = [False]
     _finished = [False]
+    # The thread already telling the backend this run failed, if any.
+    _failure_report: List = [None]
+    # Set just before the completed event goes out: from then on the backend
+    # may already hold this run's outcome.
+    _completed_attempted = [False]
+    _metrics_sent = [False]
+    completed_outcome: Dict = {}
     # The real-human-or-None audit identity, captured once below via
     # get_audit_user(). Initialized here so the failure closures can pass it
     # safely even if they fire before capture (in which case it is still None).
     system_user = None
 
-    def _mark_run_failed(error_type: str, message: str) -> None:
+    def _mark_run_failed(error_type: str, message: str,
+                         deadline: Optional[float] = None,
+                         usage: Optional[Dict] = None) -> None:
         """Best-effort: tell the backend this run failed. Idempotent (a flag race
         at worst double-sends one idempotent event). No-ops until run_id exists
         (nothing to correlate)."""
@@ -3642,9 +4112,11 @@ def main():
                     "error_type": error_type,
                     "message": message,
                     "timestamp": datetime.utcnow().isoformat() + "Z",
+                    **({"usage": usage} if usage else {}),
                 },
                 sentry_context=sentry_ctx,
                 system_user=system_user,
+                deadline=deadline,
             )
         except Exception:
             pass
@@ -3661,15 +4133,40 @@ def main():
             except Exception:
                 pass
 
-    def _report_failed_bounded(error_type: str, message: str, join_timeout: float = 15) -> None:
+    def _report_failed_bounded(error_type: str, message: str, join_timeout: float = 15,
+                               usage: Optional[Dict] = None) -> None:
         """Run the best-effort failure report on a daemon thread bounded by
         join_timeout, so a slow/retrying backend can't block exit. Used by both
-        the abort path and the normal except path (which were asymmetric)."""
+        the abort path and the normal except path (which were asymmetric).
+
+        The send carries that bound as its deadline, or it keeps the whole retry
+        curve and the process exits during the first backoff sleep."""
+        running = _failure_report[0]
+        if running is not None and running.is_alive():
+            # Another path is already reporting. _mark_run_failed claims the
+            # run before it delivers, so a second worker would return at once
+            # and let the process exit with the real report still on the wire.
+            running.join(timeout=join_timeout)
+            return
         t = threading.Thread(
-            target=_mark_run_failed, args=(error_type, message), daemon=True,
+            target=_mark_run_failed,
+            args=(error_type, message),
+            kwargs={"deadline": time.monotonic() + join_timeout, "usage": usage},
+            daemon=True,
         )
+        _failure_report[0] = t
         t.start()
         t.join(timeout=join_timeout)
+
+    def _backend_lacks_the_outcome() -> bool:
+        """Whether the completed event definitely never reached the backend. One
+        still on the wire may be being accepted, so only a resolved attempt counts;
+        nothing resolved and nothing on the wire means nothing has gone out yet,
+        which includes the stretch between the flag above and the first request."""
+        if completed_outcome.get("sending"):
+            return False
+        kind = completed_outcome.get("kind")
+        return kind is None or kind in ("unreachable", "rejected")
 
     def _abort(error_type: str, message: str) -> None:
         # No-op if the run already finished cleanly — guards the sliver between
@@ -3692,7 +4189,12 @@ def main():
             )
         except Exception:
             pass
-        _report_failed_bounded(error_type, message)
+        if not _completed_attempted[0] or _backend_lacks_the_outcome():
+            usage = None if _metrics_sent[0] else {
+                **_process_usage(),
+                "metadata": {"os": platform.system(), "script_version": SCRIPT_VERSION},
+            }
+            _report_failed_bounded(error_type, message, usage=usage)
         os._exit(1)
 
     def _on_watchdog_timeout() -> None:
@@ -3774,8 +4276,35 @@ def main():
             )
         discovery_cache.start_run(run_id, done=resume_done)
 
+        run_deadline = (
+            t_start + args.timeout if args.timeout and args.timeout > 0 else None
+        )
+        send_deadline = (
+            run_deadline - min(RUN_SEND_RESERVE_SECONDS, args.timeout / 4)
+            if run_deadline is not None else None
+        )
+        tail_grace = (
+            min(RUN_TAIL_GRACE_SECONDS, args.timeout / 8)
+            if run_deadline is not None else 0
+        )
+
         # Track failed reports for persistence
         failed_reports = []
+        # Separate from this run's own failures so they requeue ahead of them,
+        # and so the cap drops the oldest first.
+        owed_from_queue = []
+        # (home_user, tool) this run has sent a fresher report for. Not seeded from
+        # the resume checkpoint: that records installs, while the backend keys rows
+        # by name, so a resumed install cannot say whether a queued report for the
+        # same name is older than the row or newer than it. Delivering one that is
+        # older costs a single run -- its hash is cleared before it goes, so the
+        # next run re-uploads -- where dropping one that is newer loses it for good.
+        reported_pairs = set()
+        # (home_user, tool) whose row may now hold a queued older payload: the
+        # drain delivered one, or discarded one an earlier attempt may have put in
+        # S3. Their cached hash cannot stand in for an upload. A report that is
+        # still owed has replaced nothing, and its hash is cleared before it goes.
+        queued_pairs = set()
 
         # (home_user, tool_name) detected present this run; backend set-diffs it in "completed" to prune the rest.
         scanned_manifest = set()
@@ -3784,22 +4313,66 @@ def main():
         incomplete_users = []  # a detector errored here, so presence is unknown
         unreadable_users = []  # enumerated but unreadable: covered would be a claim we cannot make
 
-        # --- Drain pending reports from previous run ---
+        # --- Drain pending reports from earlier runs ---
+        # Ahead of this run's own sends: the backend replaces rows per tool name.
         with time_step("drain_pending_queue", "queue"):
             pending = load_pending_reports()
             if pending:
                 logger.info(f"Draining {len(pending)} queued report(s) from previous run...")
-                for queued_report in pending:
+                drain_budget = _drain_budget_seconds(
+                    args.timeout, time.monotonic() - t_start
+                )
+                drain_deadline = time.monotonic() + drain_budget
+                for index, queued_report in enumerate(pending):
+                    if _report_identity(queued_report) in reported_pairs:
+                        logger.info("  · Queued report superseded; dropped unsent")
+                        continue
+                    if time.monotonic() >= drain_deadline:
+                        owed_from_queue.extend(pending[index:])
+                        logger.info(
+                            f"  Drain budget of {drain_budget:.0f}s spent;"
+                            f" {len(owed_from_queue)} report(s) stay queued."
+                        )
+                        break
+                    # Even a discarded report may have landed via S3, so the hash
+                    # goes first -- and if it will not go, neither does the report.
+                    pair = _report_identity(queued_report)
+                    if pair and not discovery_cache.forget_tool_hash(pair[1], pair[0]):
+                        owed_from_queue.append(queued_report)
+                        logger.info(
+                            "  · Cached hash for this pair could not be cleared;"
+                            " report stays queued rather than going out behind it"
+                        )
+                        continue
+                    failure = {}
                     success, retryable = send_report_to_backend(
                         args.domain, args.api_key, queued_report, args.app_name,
-                        sentry_context=sentry_ctx,
+                        sentry_context=sentry_ctx, deadline=drain_deadline,
+                        failure=failure, stop_if_unreachable=True,
                     )
                     if success:
+                        if pair:
+                            queued_pairs.add(pair)
                         logger.info("  ✓ Queued report sent successfully")
                     elif retryable:
-                        failed_reports.append(queued_report)
+                        owed_from_queue.append(queued_report)
+                        if failure.get("kind") == "unreachable":
+                            # Nothing reached the backend, so nothing behind this will.
+                            owed_from_queue.extend(pending[index + 1:])
+                            logger.info(
+                                "  Backend unreachable;"
+                                f" {len(owed_from_queue)} report(s) stay queued."
+                            )
+                            break
                     else:
+                        # Discarded, but an earlier attempt may have reached S3 and
+                        # been ingested, so the row may hold this payload after all.
+                        if pair:
+                            queued_pairs.add(pair)
                         logger.warning("  ✗ Queued report discarded (non-retryable error)")
+                # Now, not at the end: an abort during detection skips the persist
+                # step, and the next run would replay these over this run's uploads.
+                save_failed_reports(owed_from_queue, replace=True)
                 logger.info("")
 
         with time_step("enumerate_users", "detect"):
@@ -3855,11 +4428,18 @@ def main():
 
         # Send scan in_progress event BEFORE scanning
         logger.info("Sending scan in_progress event...")
+        scan_start_response: Dict = {}
+        can_fix_memory = memory_fix.supports_fixes(all_users)
         with time_step("send_in_progress", "send"):
             success, _ = send_scan_event(
                 args.domain, args.api_key, device_id, run_id, "in_progress",
-                args.app_name, sentry_context=sentry_ctx, system_user=system_user
+                args.app_name, sentry_context=sentry_ctx, system_user=system_user,
+                deadline=send_deadline, response=scan_start_response,
+                capabilities=[memory_fix.CAPABILITY] if can_fix_memory else None,
             )
+        scan_memory = memory_scan_enabled(scan_start_response)
+        memory_fixes_pending = can_fix_memory and memory_fix.fixes_pending(scan_start_response)
+        memory_fix_files: List[Dict] = []
         if success:
             logger.info("✓ Scan in_progress event sent successfully")
         else:
@@ -3912,6 +4492,7 @@ def main():
                     if tool_key not in tools_by_user:
                         tools_by_user[tool_key] = tool
                         all_tools.append(tool)
+                    _keep_user_version(tools_by_user[tool_key], tool, user_home)
             else:
                 logger.info(f"    No tools found for {user}")
             logger.info("")
@@ -3992,53 +4573,10 @@ def main():
                         continue
 
                     try:
-                        # all_tools is deduped globally; skip users who didn't detect this tool (avoids phantom installs).
-                        if _install_key(user_name, tool) not in scanned_manifest:
-                            continue
-
-                        # Filter projects to only include this user's projects
                         with time_step("filter_projects", "process"):
-                            tool_filtered = detector.filter_tool_projects_by_user(tool_with_projects, user_home)
-
-                        # Owned by someone else, unless this user has their own data
-                        # for it: Copilot's install_path is the shared binary.
-                        if _machine_global_install_disowned(tool, user_home) \
-                                and not _has_user_owned_data(tool_name, tool_filtered, user_home):
-                            logger.info(
-                                f"  Skipping {tool_name} for {user_name}: "
-                                f"{tool.get('install_path')!r} is owned by another user "
-                                f"and this user has no data for it"
-                            )
-                            scanned_manifest.discard(_install_key(user_name, tool))
-                            continue
-
-                        # Ownership gate (Copilot CLI only): suppress a phantom install
-                        # row for a user who neither owns the detected ~/.copilot config
-                        # dir nor has per-user data. filter_tool_projects_by_user scopes
-                        # projects/permissions but never rewrites the paths, so the gate
-                        # is needed.
-                        if tool_name == "GitHub Copilot CLI" and not _copilot_cli_owned_by_user(tool_filtered, user_home):
-                            logger.info(
-                                f"  Skipping Copilot CLI for {user_name}: config dir "
-                                f"{tool_filtered.get('_config_path') or tool_filtered.get('install_path')!r} "
-                                f"not owned by this user and no per-user data"
-                            )
-                            # Detected globally but not owned by this user -> drop the presence entry.
-                            scanned_manifest.discard(_install_key(user_name, tool))
-                            continue
-
-                        # Ownership gate (Augment surfaces): same ~/.augment-keyed
-                        # logic so a non-owner under a root scan doesn't get a
-                        # phantom surface row.
-                        if (tool_name == "Auggie CLI" or tool_name.lower().startswith("augment (")) \
-                                and not _augment_owned_by_user(tool_filtered, user_home):
-                            logger.info(
-                                f"  Skipping {tool_name} for {user_name}: config dir "
-                                f"{tool_filtered.get('_config_path') or tool_filtered.get('install_path')!r} "
-                                f"not owned by this user and no per-user data"
-                            )
-                            # Detected globally but not owned by this user -> drop the presence entry.
-                            scanned_manifest.discard(_install_key(user_name, tool))
+                            tool_filtered = _tool_for_user(detector, tool, tool_with_projects, user_name,
+                                                           user_home, scanned_manifest)
+                        if tool_filtered is None:
                             continue
 
                         # Detect subscription plan for Claude Code
@@ -4110,6 +4648,17 @@ def main():
                             except Exception as e:
                                 logger.warning(f"    Could not detect Auggie plan for {user_name}: {e}")
 
+                        if scan_memory and tool_name.lower() == "claude code":
+                            with time_step("scan_memory_files", "process"):
+                                memories = collect_claude_memories(user_home, user_name)
+                            if memories:
+                                tool_filtered["memories"] = memories
+                            if memory_fixes_pending:
+                                try:
+                                    memory_fix_files.extend(memory_fix.held_files(user_name, user_home, memories))
+                                except Exception as held_err:
+                                    logger.debug(f"    Memory fix file list failed for {user_name}: {held_err}")
+
                         # Generate report for this single tool with this user's data
                         # user_name is the home_user (from /Users directory)
                         with time_step("prepare_payload", "process"):
@@ -4173,6 +4722,10 @@ def main():
                             try:
                                 log_report = copy.deepcopy(single_tool_report)
                                 for t in log_report.get("tools") or []:
+                                    for folder in (t.get("memories") or {}).get("folders") or []:
+                                        for memory_file in [folder.get("index")] + (folder.get("flagged") or []):
+                                            if memory_file and "content" in memory_file:
+                                                memory_file["content"] = f"<{len(memory_file['content'])} chars>"
                                     for p in t.get("projects") or []:
                                         for r in p.get("rules") or []:
                                             if "content" in r:
@@ -4180,6 +4733,12 @@ def main():
                                         for s in p.get("skills") or []:
                                             if "content" in s:
                                                 s["content"] = f"<{len(s['content'])} chars>"
+                                            # The skill's folder files too: the log shows their size, never their text.
+                                            for f in s.get("files") or []:
+                                                if "content" in f:
+                                                    f["content"] = f"<{len(f['content'])} chars>"
+                                                if "head" in f:
+                                                    f["head"] = f"<{len(f['head'])} base64 chars>"
                                         for mcp in p.get("mcpServers") or []:
                                             for tool in (mcp.get("scan") or {}).get("tools") or []:
                                                 tool.pop("inputSchema", None)
@@ -4192,7 +4751,8 @@ def main():
                                     payload_logger.info(f"  {line}")
                             except Exception as e:
                                 logger.warning(f"  Could not serialize report to JSON for logging: {e}")
-                                payload_logger.info(f"  Report structure: {single_tool_report}")
+                                payload_logger.info(
+                                    f"  Report keys: {sorted(single_tool_report) if isinstance(single_tool_report, dict) else []}")
                             payload_logger.info("  " + "=" * 70)
                             payload_logger.info("")
 
@@ -4207,15 +4767,28 @@ def main():
                         # itself when local cache shows no change since last successful upload.
                         try:
                             local_payload_hash = compute_payload_hash(single_tool_report["tools"][0])
+                            # The tool hash leaves memories out, so a memory-only change must still upload.
+                            memories_hash = (single_tool_report["tools"][0].get("memories") or {}).get("hash")
+                            if memories_hash:
+                                local_payload_hash = f"{local_payload_hash}:{memories_hash}"
                         except Exception as hash_err:
                             local_payload_hash = None
                             logger.warning(f"  Could not compute payload hash, dedup disabled this run: {hash_err}")
 
-                        cached_hash = discovery_cache.get_cached_hash(tool_name, user_name)
+                        # The queue named this pair, so the backend's row is not
+                        # what the hash describes. Upload rather than trust it.
+                        cached_hash = (
+                            None if (user_name, tool_name) in queued_pairs
+                            else discovery_cache.get_cached_hash(tool_name, user_name)
+                        )
                         reported_ok = False
                         hash_to_store = None
                         if local_payload_hash and cached_hash == local_payload_hash:
                             reported_ok = True  # unchanged -> already current on the backend
+                            # Current on the backend supersedes a queued older
+                            # report for the row just as an upload does, or the
+                            # next drain posts that payload over what is there.
+                            reported_pairs.add((user_name, tool_name))
                             if args.dump:
                                 logger.info(f"  · {tool_name} unchanged for user {user_name} (hash match), skipping upload")
                         else:
@@ -4223,9 +4796,22 @@ def main():
                                 logger.info(f"  Sending {tool_name} report for user {user_name} to backend...")
 
                             with time_step("send_report_per_tool_user", "send"):
-                                success, retryable = send_report_to_backend(args.domain, args.api_key, single_tool_report, args.app_name, sentry_context=sentry_ctx)
+                                success, retryable = send_report_to_backend(
+                                    args.domain, args.api_key, single_tool_report,
+                                    args.app_name, sentry_context=sentry_ctx,
+                                    deadline=send_deadline,
+                                )
                             if success:
                                 reported_ok = True
+                                reported_pairs.add((user_name, tool_name))
+                                # Another install of this tool name is a separate
+                                # iteration but the same row, so a failure recorded
+                                # for it earlier in this run is superseded. Done
+                                # here rather than at the end, because one recorded
+                                # after this send is not.
+                                failed_reports[:] = _drop_superseded(
+                                    failed_reports, {(user_name, tool_name)}
+                                )
                                 hash_to_store = local_payload_hash  # persist the new hash (None if hashing failed)
                                 if args.dump:
                                     logger.info(f"  ✓ {tool_name} report for user {user_name} sent successfully")
@@ -4239,6 +4825,16 @@ def main():
                         # user) so a kill afterward lets the next quick re-run skip
                         # re-processing it.
                         if reported_ok:
+                            # A report still queued for this pair would replay over
+                            # what was just sent. Only written when one was.
+                            owed = len(owed_from_queue)
+                            owed_from_queue[:] = _drop_superseded(
+                                owed_from_queue, reported_pairs
+                            )
+                            if len(owed_from_queue) != owed:
+                                save_failed_reports(
+                                    owed_from_queue + failed_reports, replace=True
+                                )
                             discovery_cache.record_report(tool_name, user_name, tool_key, payload_hash=hash_to_store)
 
                         if args.dump:
@@ -4259,7 +4855,8 @@ def main():
                         success, _ = send_scan_event(
                             args.domain, args.api_key, device_id, run_id, "failed",
                             args.app_name, home_user=user_name, scan_error=scan_error,
-                            sentry_context=sentry_ctx, system_user=system_user
+                            sentry_context=sentry_ctx, system_user=system_user,
+                            deadline=send_deadline,
                         )
                         if not success:
                             logger.warning("✗ Failed to send scan failed event")
@@ -4295,10 +4892,15 @@ def main():
         # Per-tool key, stale from here on; later events inherit this dict.
         sentry_ctx.pop("tool_name", None)
 
-        # --- Persist any failed reports for the next run ---
+        # --- Persist what is still owed for the next run ---
         with time_step("persist_failed_reports", "queue"):
-            if failed_reports:
-                save_failed_reports(failed_reports)
+            # Backlog first: the queue keeps its newest entries when it hits the cap.
+            still_owed = _drop_superseded(owed_from_queue, reported_pairs) + failed_reports
+            superseded = len(owed_from_queue) + len(failed_reports) - len(still_owed)
+            if superseded:
+                logger.info(f"Dropped {superseded} queued report(s) superseded by this run.")
+            if still_owed:
+                save_failed_reports(still_owed, replace=True)
             else:
                 queue_file = _get_queue_file_path()
                 if queue_file.exists():
@@ -4314,12 +4916,15 @@ def main():
         # Forward client-side timing metrics to backend (best-effort, success path only).
         # Backend emits these as Sentry distributions via emit_discovery_metrics.
         try:
+            elevated = os.getuid() == 0 if hasattr(os, "getuid") else _windows_process_is_elevated()
             sentry_metrics_payload = {
                 "total_duration_ms": round((time.monotonic() - t_start) * 1000),
+                **_process_usage(),
                 "steps": [
                     {
                         "name": name,
                         "duration_ms": round(duration),
+                        "cpu_ms": round(step_cpu_ms.get(name, 0.0)),
                         "phase": step_phases.get(name),
                     }
                     for name, duration in step_durations_ms.items()
@@ -4332,6 +4937,7 @@ def main():
                     "scan_incomplete": bool(incomplete_reasons),
                     "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
                     "script_version": SCRIPT_VERSION,
+                    **({} if elevated is None else {"elevated": elevated}),
                     # Observability for the kill/rerun behavior so it's visible in
                     # dashboards and alertable if the checkpoint logic misbehaves
                     # (e.g. a spike in resumed runs or in skipped pairs/tools):
@@ -4352,9 +4958,18 @@ def main():
                     {"tool": tool_key, **counts}
                     for tool_key, counts in sorted(detector.skills_metrics.items())
                 ]
-            send_discovery_metrics(
+            metrics_deadline = None
+            if run_deadline is not None:
+                now = time.monotonic()
+                metrics_deadline = now + max(
+                    0.0, (run_deadline - tail_grace - now) / 2
+                )
+            # Set before the send: an abort mid-send may drop one sample but never double-counts.
+            _metrics_sent[0] = True
+            _metrics_sent[0] = send_discovery_metrics(
                 args.domain, args.api_key, device_id,
                 sentry_metrics_payload, run_id=run_id, app_name=args.app_name,
+                deadline=metrics_deadline,
             )
         except Exception as metrics_err:
             logger.debug(f"Building/sending discovery metrics failed: {metrics_err}")
@@ -4441,15 +5056,32 @@ def main():
                     for hu, tn in sorted({(hu, tn) for hu, tn, _ in scanned_manifest})]
         covered = [u for u in all_users
                    if u not in unreadable_users and u not in incomplete_users]
+        # The one send a run must not skip -- its manifest is what the backend
+        # prunes against -- so it gets the whole budget, tail included.
+        _completed_attempted[0] = True
         success, _ = send_scan_event(
             args.domain, args.api_key, device_id, run_id, "completed",
             args.app_name, sentry_context=sentry_ctx, system_user=system_user,
             manifest=manifest, covered_home_users=covered,
+            deadline=run_deadline, failure=completed_outcome,
         )
+        completed_sent = success
         if success:
             logger.info("✓ Scan completed event sent successfully")
+        elif completed_outcome.get("kind") == "uncertain":
+            # It may have landed, and contradicting that is worse than silence.
+            logger.warning("✗ Scan completed event went unanswered; leaving the run as it is")
         else:
-            logger.warning("✗ Failed to send scan completed event")
+            # The backend does not have it and nothing else will say so: the
+            # checkpoint below stops a resume and the watchdog is cancelled.
+            logger.warning(
+                "✗ Failed to send scan completed event; closing the run so it does"
+                " not sit in progress for ever"
+            )
+            _report_failed_bounded(
+                "CompletedEventUndelivered",
+                "the scan finished, but its completed event could not be delivered",
+            )
         logger.info("")
 
         # Local scan finished cleanly -> flip the checkpoint to "completed" so the
@@ -4462,15 +5094,33 @@ def main():
         # as part of every discovery so it self-heals over time. Best-effort —
         # never let it affect the discovery run's outcome.
         try:
-            sent, failed, matched = run_sweep(args.domain, args.api_key)
+            # Best-effort, so it gets the deadline less the tail and stops short
+            # of the watchdog rather than being killed at it.
+            sent, failed, matched = run_sweep(
+                args.domain, args.api_key,
+                deadline=(run_deadline - tail_grace
+                          if run_deadline is not None else None),
+            )
             logger.info(f"Connector UUID sweep: resolved {sent}, failed {failed}, matched {matched}")
         except Exception as sweep_err:
             logger.debug(f"Connector UUID sweep failed: {sweep_err}")
 
+        # Only after the completed event landed, so the backend compares against the scan just saved.
+        if completed_sent and memory_fixes_pending:
+            try:
+                memory_fix.apply_pending_fixes(
+                    args.domain, args.api_key, device_id, memory_fix_files,
+                    deadline=(run_deadline - tail_grace if run_deadline is not None else None),
+                )
+            except Exception as fix_err:
+                logger.warning(f"Memory file fixes failed: {fix_err}")
+
     except Exception as e:
         # Report the crash as a failed run (idempotent — the watchdog/signal
         # paths may have already reported, in which case this is a no-op).
-        if device_id and run_id:
+        if _completed_attempted[0] and not _backend_lacks_the_outcome():
+            logger.error("Not sending scan failed event - the outcome is already reported")
+        elif device_id and run_id:
             logger.error("Sending scan failed event due to error...")
             _report_failed_bounded(type(e).__name__, str(e))
         else:

@@ -210,7 +210,9 @@ def read_cache() -> dict:
         return {}
 
 
-def atomic_write_cache(data: dict) -> None:
+def atomic_write_cache(data: dict) -> bool:
+    """Returns whether the cache reached disk, for a caller whose next step is
+    only safe once it has."""
     try:
         # Refuse to write the cache (which can contain MCP configs / tool
         # inventory / paths) through a symlinked state dir — but ONLY for the
@@ -221,8 +223,9 @@ def atomic_write_cache(data: dict) -> None:
         # since mkdir(parents=True) would follow a symlink and create its target.
         if UNBOUND_DIR != _HOME_STATE_DIR and UNBOUND_DIR.is_symlink():
             logger.warning(f"discovery-cache write skipped: fallback state dir is a symlink: {UNBOUND_DIR}")
-            return
+            return False
         UNBOUND_DIR.mkdir(parents=True, exist_ok=True)
+        wrote = False
         fd, tmp = tempfile.mkstemp(prefix=".discovery-cache.", suffix=".tmp", dir=str(UNBOUND_DIR))
         try:
             # Owner-only: the cache holds the resume checkpoint + tool inventory.
@@ -236,15 +239,18 @@ def atomic_write_cache(data: dict) -> None:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, sort_keys=True)
             os.replace(tmp, CACHE_PATH)
+            wrote = True
         finally:
             if os.path.exists(tmp):
                 try:
                     os.unlink(tmp)
                 except OSError:
                     pass
+        return wrote
     except OSError as e:
         logger.warning(f"discovery-cache write failed: {e}")
         report_to_sentry(e, {"phase": "cache"}, level="warning")
+        return False
 
 
 def _set_tool_hash(cache: dict, tool_name: str, home_user: str, payload_hash: str) -> None:
@@ -267,6 +273,24 @@ def update_tool(tool_name: str, home_user: str, payload_hash: str) -> None:
     cache = read_cache()
     _set_tool_hash(cache, tool_name, home_user, payload_hash)
     atomic_write_cache(cache)
+
+
+def forget_tool_hash(tool_name: str, home_user: str) -> bool:
+    """Drop the recorded hash for one (tool, home_user) so the next detection
+    uploads. False means the write did not land and a later run still reads it."""
+    cache = read_cache()
+    if not cache and CACHE_PATH.exists():
+        # read_cache() flattens a read failure into an empty dict, so a file that
+        # exists and came back as nothing is not a cache we can claim to know.
+        return False
+    tools = cache.get("tools")
+    if not isinstance(tools, dict):
+        return True
+    by_user = tools.get(tool_name)
+    if not isinstance(by_user, dict) or home_user not in by_user:
+        return True
+    by_user.pop(home_user, None)
+    return atomic_write_cache(cache)
 
 
 def get_cached_hash(tool_name: str, home_user: str, cache: Optional[dict] = None) -> Optional[str]:

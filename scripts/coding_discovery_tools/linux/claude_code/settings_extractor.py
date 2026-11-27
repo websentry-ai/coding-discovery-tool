@@ -1,12 +1,12 @@
 """
 Claude Code settings extraction for Linux.
 
-Extracts permission settings from file-based scopes only (no plist/MDM on Linux):
-1. User scope:    ~/.claude/settings.json
-2. Project scope: **/.claude/settings.json
-3. Local scope:   **/.claude/settings.local.json
-
-Linux has no macOS managed-settings or plist equivalents.
+Extracts permission settings from file-based scopes (Linux has no plist):
+1. Managed drop-in scope: /etc/claude-code/managed-settings.d/*.json
+2. Managed scope:         /etc/claude-code/managed-settings.json
+3. Local scope:           **/.claude/settings.local.json
+4. Project scope:         **/.claude/settings.json
+5. User scope:            ~/.claude/settings.json
 """
 
 import json
@@ -30,13 +30,37 @@ logger = logging.getLogger(__name__)
 class LinuxClaudeSettingsExtractor(BaseClaudeSettingsExtractor):
     """Extractor for Claude Code settings on Linux systems."""
 
+    MANAGED_SETTINGS_PATH = Path("/etc/claude-code/managed-settings.json")
+    MANAGED_DROPIN_DIR = Path("/etc/claude-code/managed-settings.d")
+
     def extract_settings(self) -> Optional[List[Dict]]:
         all_settings: List[Dict] = []
 
         all_settings.extend(self._extract_user_settings())
         all_settings.extend(self._extract_project_settings())
+        all_settings.extend(self._extract_managed_settings())
 
         return all_settings if all_settings else None
+
+    # ------------------------------------------------------------------
+    # Managed settings (/etc/claude-code), deployed by the organization
+    # ------------------------------------------------------------------
+
+    def _extract_managed_settings(self) -> List[Dict]:
+        settings_list: List[Dict] = []
+        managed = self._parse_settings_file(self.MANAGED_SETTINGS_PATH, "managed")
+        if managed:
+            settings_list.append(managed)
+        try:
+            dropins = sorted(self.MANAGED_DROPIN_DIR.glob("*.json")) if self.MANAGED_DROPIN_DIR.is_dir() else []
+        except (PermissionError, OSError) as e:
+            logger.debug(f"Error reading {self.MANAGED_DROPIN_DIR}: {e}")
+            dropins = []
+        for dropin in dropins:
+            s = self._parse_settings_file(dropin, "managed_dropin")
+            if s:
+                settings_list.append(s)
+        return settings_list
 
     # ------------------------------------------------------------------
     # User settings (~/.claude/settings.json)

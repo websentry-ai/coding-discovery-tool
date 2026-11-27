@@ -22,8 +22,9 @@ logger = logging.getLogger(__name__)
 CAPABILITY = "memory_fix"
 FIXES_PATH = "/api/v1/ai-tools/memory-fixes/"
 RESULTS_PATH = "/api/v1/ai-tools/memory-fixes/results/"
-POLL_INTERVAL_SECONDS = 120
-POLL_WINDOW_SECONDS = 20 * 60
+# Five asks, at 0, 5, 10, 15 and 20 minutes: saving a scan and judging it rarely finish sooner than a few minutes.
+POLL_INTERVAL_SECONDS = 5 * 60
+POLL_WINDOW_SECONDS = 25 * 60
 REQUEST_TIMEOUT_SECONDS = 30
 HELPER_TIMEOUT_SECONDS = 30
 # The self-test runs before every root scan on macOS, so it gets less time than a fix.

@@ -515,25 +515,24 @@ class PollAsksTheBackend(_Files):
         files_per_round = [[f["file_path"] for f in body["files"]] for body in self.fix_posts()]
         self.assertEqual(files_per_round, [[h["file_path"] for h in held]])
 
-    def test_only_a_pending_file_is_asked_again_every_two_minutes_until_twenty_minutes(self):
+    def test_only_a_pending_file_is_asked_again_every_five_minutes_five_times_in_all(self):
         held = [self.candidate(f"{name}.md", f"{name} {SECRET_A}") for name in ("p", "absent")]
         self.answers = [lambda body: {"fixes": [_status(1, held[0], "pending")]}] * 100
 
         counts = self.run_fixes(held)
 
-        self.assertEqual(len(self.fix_posts()), 10)
-        self.assertEqual([len(body["files"]) for body in self.fix_posts()], [2] + [1] * 9)
-        self.assertEqual(self.clock.slept, 9 * memory_fix.POLL_INTERVAL_SECONDS)
-        self.assertEqual(counts, {"rounds": 10})
+        self.assertEqual([len(body["files"]) for body in self.fix_posts()], [2] + [1] * 4)
+        self.assertEqual(self.clock.slept, 4 * 300)
+        self.assertEqual(counts, {"rounds": 5})
         self.assertEqual(self.result_posts(), [])
 
     def test_the_run_deadline_cuts_the_wait_short(self):
         held = self.candidate("p.md", "p " + SECRET_A)
         self.answers = [lambda body: {"fixes": [_status(1, held, "pending")]}] * 10
 
-        self.run_fixes([held], deadline=self.clock.monotonic() + 300)
+        self.run_fixes([held], deadline=self.clock.monotonic() + 700)
 
-        self.assertEqual(len(self.fix_posts()), 3)  # at 0, 120 and 240 s; 360 s is past it
+        self.assertEqual(len(self.fix_posts()), 3)  # at 0, 300 and 600 s; 900 s is past it
 
     def test_a_pending_file_that_turns_ready_later_is_fixed_then(self):
         text = "t " + SECRET_A

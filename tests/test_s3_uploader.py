@@ -96,7 +96,7 @@ class _ServerMixin:
 class TestS3UploadFlow(_ServerMixin, unittest.TestCase):
     def _payload(self):
         return {
-            "device_id": "DEV-1",
+            "device_discovery_id": "DEV-1",
             "system_user": "alice",
             "home_user": "alice",
             "run_id": str(uuid.uuid4()),
@@ -135,6 +135,30 @@ class TestS3UploadFlow(_ServerMixin, unittest.TestCase):
         from_s3_body = json.loads(self.server.requests[2]["body"])
         self.assertNotIn("tools", from_s3_body)
         self.assertEqual(from_s3_body["object_key"], "org/1/run/abc.json")
+        self.assertEqual(from_s3_body["device_discovery_id"], "DEV-1")
+
+    @patch.object(utils_mod, "_SENTRY_DSN", "")
+    def test_queued_payload_with_legacy_key_still_sends_the_new_one(self):
+        """A report queued before the rename carries device_id; both bodies must still name the device."""
+        upload_url = f"{self.base_url}/s3-bucket/object-key.json"
+        self._set_path_response("/api/v1/ai-tools/report/upload-url/", 200, json.dumps({
+            "upload_url": upload_url,
+            "object_key": "org/1/run/legacy.json",
+            "expires_in": 300,
+        }).encode())
+        self._set_path_response("/s3-bucket/object-key.json", 200, b"")
+        self._set_path_response("/api/v1/ai-tools/report/from-s3/", 202, json.dumps({"status": "queued"}).encode())
+
+        legacy = self._payload()
+        legacy["device_id"] = legacy.pop("device_discovery_id")
+
+        success, retryable = try_s3_upload(self.base_url, "k", legacy)
+
+        self.assertTrue(success)
+        self.assertFalse(retryable)
+        meta_body = json.loads(self.server.requests[0]["body"])
+        from_s3_body = json.loads(self.server.requests[2]["body"])
+        self.assertEqual(meta_body["device_discovery_id"], "DEV-1")
         self.assertEqual(from_s3_body["device_discovery_id"], "DEV-1")
 
     @patch.object(utils_mod, "_SENTRY_DSN", "")

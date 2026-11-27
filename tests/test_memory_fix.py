@@ -4,13 +4,17 @@ import hashlib
 import io
 import json
 import os
-import pwd
 import shutil
 import stat
 import sys
 import tempfile
 import threading
 import unittest
+
+if os.name == "nt":
+    raise unittest.SkipTest("Fix It runs on macOS only; its helper needs POSIX file calls")
+
+import pwd  # noqa: E402
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import Mock, patch

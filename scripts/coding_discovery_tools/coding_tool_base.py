@@ -42,6 +42,8 @@ class BaseDeviceIdExtractor(ABC):
 class BaseToolDetector(ABC):
     """Abstract base class for AI tool detection."""
 
+    agent_group_id: Optional[str] = None
+
     @property
     @abstractmethod
     def tool_name(self) -> str:

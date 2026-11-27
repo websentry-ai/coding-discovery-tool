@@ -170,6 +170,27 @@ class HelperRefusesAndLeavesTheFileAlone(_Folder):
         self.assertEqual(path.read_bytes(), text + b" and a line the user just added")
         self.assert_only("m.md")
 
+    @unittest.skipUnless(sys.platform == "darwin", "the atomic swap is macOS only")
+    def test_a_second_save_landing_during_the_swap_back_is_the_one_kept(self):
+        text = b"t " + SECRET_A.encode()
+        path = self.write("m.md", text)
+        real = helper._exchange
+        saves = []
+
+        def saved_just_before(dir_fd, first, second):
+            if len(saves) < 2:
+                saves.append(1)
+                newer = path.with_name("newer")
+                newer.write_bytes(text + b" save %d" % len(saves))
+                os.replace(newer, path)
+            return real(dir_fd, first, second)
+
+        with patch.object(helper, "_exchange", saved_just_before):
+            self.assert_failed(self.fix(path, text, [[2, len(text)]]), "changed")
+
+        self.assertEqual(path.read_bytes(), text + b" save 2")
+        self.assert_only("m.md")
+
     def test_a_symlinked_file_is_refused(self):
         outside = self.base / "outside.md"
         outside.write_bytes(b"t " + SECRET_A.encode())
@@ -372,7 +393,7 @@ class MarkerIsNotASecret(unittest.TestCase):
 
 
 class _Files(_Folder):
-    """Real memory files the poll hashes; the network and the helper launch are faked."""
+    """Real memory files the poll hashes, asked about over real curl to a localhost backend; the helper is faked."""
 
     def setUp(self):
         super().setUp()
@@ -381,26 +402,46 @@ class _Files(_Folder):
         clock_patch.start()
         self.addCleanup(clock_patch.stop)
         self.posts, self.helper_calls = [], []
-        self.answers = []
+        self.answers, self.fix_statuses, self.result_statuses = [], [], []
+        outer = self
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+                outer.posts.append((self.path, body))
+                if self.path == memory_fix.RESULTS_PATH:
+                    status = outer.result_statuses.pop(0) if outer.result_statuses else 200
+                    reply = {"recorded": len(body.get("results", []))}
+                else:
+                    status = outer.fix_statuses.pop(0) if outer.fix_statuses else 200
+                    reply = outer.answers.pop(0)(body) if outer.answers else {"fixes": []}
+                data = json.dumps(reply).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *_args):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
 
     def candidate(self, name: str, text: str) -> dict:
         path = self.write(name, text.encode("utf-8"))
         return {"home_user": ME, "home": str(self.base), "file_path": str(path), "memory_root": str(self.root)}
-
-    def fake_post(self, _link, path, body):
-        self.posts.append((path, json.loads(json.dumps(body))))
-        if path == memory_fix.RESULTS_PATH:
-            return {"recorded": len(body["results"])}
-        return self.answers.pop(0)(body) if self.answers else {"fixes": []}
 
     def fake_helper(self, request, uid, gid, timeout=None):
         self.helper_calls.append((request, uid, gid))
         return helper.fix_file(request["file_path"], request["memory_root"], request["sha256"], request["spans"])
 
     def run_fixes(self, candidates, helper_fn=None, deadline=None):
-        with patch.object(memory_fix, "_post_json", self.fake_post), \
-                patch.object(memory_fix, "run_helper", helper_fn or self.fake_helper):
-            return memory_fix.apply_pending_fixes("http://x", "key", "dev-1", candidates, deadline=deadline)
+        with patch.object(memory_fix, "run_helper", helper_fn or self.fake_helper):
+            return memory_fix.apply_pending_fixes(self.url, "key", "dev-1", candidates, deadline=deadline)
 
     def fix_posts(self):
         return [body for path, body in self.posts if path == memory_fix.FIXES_PATH]
@@ -517,14 +558,8 @@ class PollAsksTheBackend(_Files):
         text = "t " + SECRET_A
         held = self.candidate("m.md", text)
         self.answers = [lambda body: {"fixes": [_ready(7, held, [_span(text, SECRET_A)])]}]
-        failures = [None, None]
-        real_post = self.fake_post
+        self.result_statuses = [500, 500]
 
-        def flaky_post(link, path, body):
-            answer = real_post(link, path, body)
-            return failures.pop() if path == memory_fix.RESULTS_PATH and failures else answer
-
-        self.fake_post = flaky_post
         counts = self.run_fixes([held])
 
         self.assertEqual(len(self.result_posts()), 3)
@@ -534,9 +569,7 @@ class PollAsksTheBackend(_Files):
         text = "t " + SECRET_A
         held = self.candidate("m.md", text)
         self.answers = [lambda body: {"fixes": [_ready(7, held, [_span(text, SECRET_A)])]}]
-        real_post = self.fake_post
-        self.fake_post = lambda link, path, body: (
-            real_post(link, path, body) and None if path == memory_fix.RESULTS_PATH else real_post(link, path, body))
+        self.result_statuses = [500, 500, 500]
 
         counts = self.run_fixes([held])
 
@@ -587,15 +620,16 @@ class PollAsksTheBackend(_Files):
             self.run_fixes([held])
         self.assertEqual(Path(held["file_path"]).read_text(), "t " + SECRET_A)
 
-    def test_the_post_itself_survives_curl_failures_and_bad_bodies(self):
-        link = memory_fix._Link("http://x", "key", "dev", None)
-        for reply in ((False, None, "", "curl: (7)"), (True, 500, '{"fixes": []}', None),
-                      (True, 200, "not json", None), (True, 200, "[1]", None), RuntimeError("boom")):
-            with patch.object(memory_fix, "_curl_post_json",
-                              Mock(side_effect=reply) if isinstance(reply, Exception) else Mock(return_value=reply)):
-                self.assertIsNone(memory_fix._post_json(link, memory_fix.FIXES_PATH, {}), reply)
-        with patch.object(memory_fix, "_curl_post_json", Mock(return_value=(True, 200, '{"fixes": []}', None))):
-            self.assertEqual(memory_fix._post_json(link, memory_fix.FIXES_PATH, {}), {"fixes": []})
+    def test_the_post_itself_survives_a_dead_backend_an_error_status_and_bad_bodies(self):
+        link = memory_fix._Link(self.url, "key", "dev", None)
+        self.assertIsNone(memory_fix._post_json(memory_fix._Link("http://127.0.0.1:1", "key", "dev", None),
+                                                memory_fix.FIXES_PATH, {}))
+        self.fix_statuses = [500]
+        self.assertIsNone(memory_fix._post_json(link, memory_fix.FIXES_PATH, {}))
+        for reply in ("not an object", [1], None):
+            self.answers = [lambda body, reply=reply: reply]
+            self.assertIsNone(memory_fix._post_json(link, memory_fix.FIXES_PATH, {}), reply)
+        self.assertEqual(memory_fix._post_json(link, memory_fix.FIXES_PATH, {}), {"fixes": []})
 
     def test_apply_pending_fixes_never_raises(self):
         with patch.object(memory_fix, "_poll", Mock(side_effect=RuntimeError("boom"))):

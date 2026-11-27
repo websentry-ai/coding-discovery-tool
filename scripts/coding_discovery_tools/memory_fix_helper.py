@@ -17,6 +17,7 @@ FAILURE_REASONS = ("changed", "missing", "too_large", "not_utf8", "refused")
 _SHA256 = re.compile(r"[0-9a-fA-F]{64}")
 _RENAME_SWAP = 0x2  # macOS renameatx_np: exchange the two names in one step
 _COPYFILE_ACL_XATTR = (1 << 0) | (1 << 2)  # macOS fcopyfile: COPYFILE_ACL | COPYFILE_XATTR
+_SWAP_BACK_TRIES = 4
 _DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 _READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
 
@@ -189,8 +190,30 @@ def _exchange(dir_fd: int, first: str, second: str) -> bool:
         return False
 
 
+def _identity(dir_fd: int, name: str) -> Optional[Tuple[int, int]]:
+    try:
+        now = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except OSError:
+        return None
+    return now.st_dev, now.st_ino
+
+
+def _put_back(dir_fd: int, temp_name: str, name: str, placed: Optional[Tuple[int, int]]) -> None:
+    """Swaps the newer save held under the temp name back in, and again if yet another save landed meanwhile."""
+    for _ in range(_SWAP_BACK_TRIES):
+        placing = _identity(dir_fd, temp_name)
+        if not _exchange(dir_fd, temp_name, name):
+            break
+        # Getting back what was last put there means nothing was saved in between: the newest save is in place.
+        if _identity(dir_fd, temp_name) == placed:
+            return
+        placed = placing
+    os.rename(temp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+
+
 def _put_in_place(dir_fd: int, temp_name: str, name: str, before: os.stat_result) -> None:
     """Makes the temp file the file, and undoes it if someone saved the file in that instant."""
+    mine = _identity(dir_fd, temp_name)
     if not _exchange(dir_fd, temp_name, name):
         os.rename(temp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
         return
@@ -199,8 +222,7 @@ def _put_in_place(dir_fd: int, temp_name: str, name: str, before: os.stat_result
         _remove(dir_fd, temp_name)
         return
     # A newer save was swapped out: it goes back, and the fix waits for the next scan.
-    if not _exchange(dir_fd, temp_name, name):
-        os.rename(temp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    _put_back(dir_fd, temp_name, name, mine)
     raise _Failed("changed")
 
 

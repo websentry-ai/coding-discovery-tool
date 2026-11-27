@@ -246,10 +246,11 @@ def _spans(answer: Dict) -> Optional[List[List[int]]]:
 def _apply(entry: Dict, answer: Dict, deadline: Optional[float]) -> Optional[Dict]:
     """The result to post for one ready fix, or None when there is nothing to report yet."""
     fix_id, token, spans = answer.get("id"), answer.get("token"), _spans(answer)
-    timeout = clip_to_deadline(HELPER_TIMEOUT_SECONDS, deadline)
+    needed = HELPER_TIMEOUT_SECONDS + REQUEST_TIMEOUT_SECONDS
     if not isinstance(fix_id, int) or isinstance(fix_id, bool) or not isinstance(token, str) or not spans:
         return None
-    if timeout is None:
+    # Started only with time left to report it, so an edit is never made and then left unreported.
+    if clip_to_deadline(needed, deadline) != needed:
         return None
     owner = _home_owner(entry.get("home")) if entry.get("home_user") else None
     if owner is None:
@@ -260,7 +261,7 @@ def _apply(entry: Dict, answer: Dict, deadline: Optional[float]) -> Optional[Dic
     if owner[0] == 0 or outside:
         return {"id": fix_id, "outcome": "failed", "reason": "refused", "token": token}
     reply = run_helper({"op": "fix", "file_path": entry["file_path"], "memory_root": entry["memory_root"],
-                        "sha256": entry["sha256"], "spans": spans}, *owner, timeout=timeout)
+                        "sha256": entry["sha256"], "spans": spans}, *owner)
     outcome = (reply or {}).get("outcome")
     if outcome == "fixed":
         return {"id": fix_id, "outcome": "fixed", "token": token}

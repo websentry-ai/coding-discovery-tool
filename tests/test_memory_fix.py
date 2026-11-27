@@ -466,6 +466,16 @@ class PollAsksTheBackend(_Files):
                          [{"id": 7, "outcome": "failed", "reason": "refused", "token": "tok"}])
         self.assertEqual((self.helper_calls, Path(held["file_path"]).read_text()), ([], text))
 
+    def test_a_fix_is_not_started_without_time_left_to_report_it(self):
+        text = "t " + SECRET_A
+        held = self.candidate("m.md", text)
+        self.answers = [lambda body: {"fixes": [_ready(7, held, [_span(text, SECRET_A)])]}]
+
+        counts = self.run_fixes([held], deadline=self.clock.monotonic() + 20)
+
+        self.assertEqual((self.helper_calls, self.result_posts(), counts["no_answer"]), ([], [], 1))
+        self.assertEqual(Path(held["file_path"]).read_text(), text)
+
     def test_a_result_post_that_fails_is_tried_again(self):
         text = "t " + SECRET_A
         held = self.candidate("m.md", text)

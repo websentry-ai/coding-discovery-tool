@@ -179,15 +179,17 @@ def _write_temp(dir_fd: int, name: str, data: bytes, before: os.stat_result) -> 
     return temp_name
 
 
-def _exchange(dir_fd: int, first: str, second: str) -> bool:
-    """Swaps two names in the folder in one atomic step where the OS can (macOS); False when it cannot."""
+def _exchange(dir_fd: int, first: str, second: str) -> Optional[bool]:
+    """Swaps two names in one atomic step: True done, False refused, None where the OS or disk has no such swap."""
     try:
         import ctypes
         swap = ctypes.CDLL(None, use_errno=True).renameatx_np
         swap.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
-        return swap(dir_fd, os.fsencode(first), dir_fd, os.fsencode(second), _RENAME_SWAP) == 0
+        if swap(dir_fd, os.fsencode(first), dir_fd, os.fsencode(second), _RENAME_SWAP) == 0:
+            return True
+        return None if ctypes.get_errno() in (errno.ENOTSUP, errno.EINVAL) else False
     except (ImportError, OSError, AttributeError, TypeError, ValueError):
-        return False
+        return None
 
 
 def _identity(dir_fd: int, name: str) -> Optional[Tuple[int, int]]:
@@ -208,15 +210,20 @@ def _put_back(dir_fd: int, temp_name: str, name: str, placed: Optional[Tuple[int
         if _identity(dir_fd, temp_name) == placed:
             return
         placed = placing
+    # Out of swaps: the newer save held here still goes back; dropping it would be the certain loss.
     os.rename(temp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
 
 
 def _put_in_place(dir_fd: int, temp_name: str, name: str, before: os.stat_result) -> None:
     """Makes the temp file the file, and undoes it if someone saved the file in that instant."""
     mine = _identity(dir_fd, temp_name)
-    if not _exchange(dir_fd, temp_name, name):
+    swapped = _exchange(dir_fd, temp_name, name)
+    if swapped is None:
         os.rename(temp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
         return
+    # A swap the OS refused means the file moved under it (a save in flight): nothing is overwritten.
+    if not swapped:
+        raise _Failed("changed")
     # The swap is atomic, so the temp name now holds exactly what the fix replaced.
     if _still_same(dir_fd, temp_name, before):
         _remove(dir_fd, temp_name)

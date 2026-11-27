@@ -191,6 +191,20 @@ class HelperRefusesAndLeavesTheFileAlone(_Folder):
         self.assertEqual(path.read_bytes(), text + b" save 2")
         self.assert_only("m.md")
 
+    def test_a_swap_the_os_refuses_changes_nothing_and_a_missing_swap_falls_back_to_the_rename(self):
+        text = b"t " + SECRET_A.encode()
+        path = self.write("m.md", text)
+
+        with patch.object(helper, "_exchange", return_value=False):
+            self.assert_failed(self.fix(path, text, [[2, len(text)]]), "changed")
+        self.assertEqual(path.read_bytes(), text)
+        self.assert_only("m.md")
+
+        with patch.object(helper, "_exchange", return_value=None):
+            self.assertEqual(self.fix(path, text, [[2, len(text)]]), {"outcome": "fixed"})
+        self.assertEqual(path.read_bytes(), b"t " + MARKER.encode())
+        self.assert_only("m.md")
+
     def test_a_symlinked_file_is_refused(self):
         outside = self.base / "outside.md"
         outside.write_bytes(b"t " + SECRET_A.encode())

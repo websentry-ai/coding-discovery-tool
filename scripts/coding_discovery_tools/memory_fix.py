@@ -20,7 +20,6 @@ from .utils import clip_to_deadline, curl_kill_grace, normalize_url
 logger = logging.getLogger(__name__)
 
 CAPABILITY = "memory_fix"
-KILL_SWITCH_ENV = "UNBOUND_MEMORY_FIX"
 FIXES_PATH = "/api/v1/ai-tools/memory-fixes/"
 RESULTS_PATH = "/api/v1/ai-tools/memory-fixes/results/"
 POLL_INTERVAL_SECONDS = 120
@@ -33,7 +32,6 @@ PING_TIMEOUT_SECONDS = 10
 FILES_PER_POST = 500
 RESULTS_PER_POST = 100
 RESULT_POST_TRIES = 3
-_FALSEY = frozenset({"0", "false", "no", "off"})
 
 
 class _Link(NamedTuple):
@@ -100,10 +98,6 @@ def run_helper(request: Dict, uid: Optional[int], gid: Optional[int],
     return _one_json_line(out) if child.returncode == 0 else None
 
 
-def _switched_on() -> bool:
-    return os.environ.get(KILL_SWITCH_ENV, "").strip().lower() not in _FALSEY
-
-
 def _owner(home_user: str) -> Optional[Tuple[int, int]]:
     """(uid, gid) of the OS user, or None when the name is empty or unknown."""
     if not home_user:
@@ -127,9 +121,9 @@ def _home_owner(home: Optional[str]) -> Optional[Tuple[int, int]]:
 
 
 def supports_fixes(users: List[str]) -> bool:
-    """True when this is a macOS root run, the kill switch is not off and the helper answers as a scanned user."""
+    """True when this is a macOS root run and the helper answers as a scanned user."""
     try:
-        if sys.platform != "darwin" or _euid() != 0 or not _switched_on():
+        if sys.platform != "darwin" or _euid() != 0:
             return False
         owner = next((owner for owner in map(_owner, users) if owner and owner[0] != 0), None)
         answer = owner and run_helper({"op": "ping"}, *owner, timeout=PING_TIMEOUT_SECONDS)

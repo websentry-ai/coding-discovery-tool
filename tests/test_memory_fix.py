@@ -673,12 +673,11 @@ class HeldFiles(unittest.TestCase):
 
 class SupportsFixes(unittest.TestCase):
 
-    def gate(self, platform="darwin", euid=0, switch=None, ping=None, users=(ME,)):
-        env = {} if switch is None else {memory_fix.KILL_SWITCH_ENV: switch}
+    def gate(self, platform="darwin", euid=0, ping=None, users=(ME,)):
         ping = {"ok": True, "helper": "memory-fix", "protocol": 1} if ping is None else ping
         run = Mock(return_value=ping)
         with patch.object(memory_fix.sys, "platform", platform), patch.object(memory_fix, "_euid", return_value=euid), \
-                patch.dict(os.environ, env), patch.object(memory_fix, "run_helper", run), \
+                patch.object(memory_fix, "run_helper", run), \
                 patch.object(memory_fix, "_owner", side_effect=lambda name: {ME: (501, 20), "root": (0, 0)}.get(name)):
             return memory_fix.supports_fixes(list(users)), run
 
@@ -688,11 +687,12 @@ class SupportsFixes(unittest.TestCase):
         run.assert_called_once_with({"op": "ping"}, 501, 20, timeout=memory_fix.PING_TIMEOUT_SECONDS)
 
     def test_false_otherwise(self):
-        for options in ({"platform": "linux"}, {"platform": "win32"}, {"euid": 501}, {"switch": "0"},
-                        {"switch": "false"}, {"switch": " OFF "}, {"ping": {}}, {"ping": {"ok": True, "protocol": 2}},
-                        {"ping": {"ok": "yes", "protocol": 1}}, {"users": ()}, {"users": ("root", "ghost")}):
+        for options in ({"platform": "linux"}, {"platform": "win32"}, {"euid": 501}, {"ping": {}},
+                        {"ping": {"ok": True, "protocol": 2}}, {"ping": {"ok": "yes", "protocol": 1}},
+                        {"users": ()}, {"users": ("root", "ghost")}):
             self.assertFalse(self.gate(**options)[0], options)
-        with patch.object(os.environ, "get", Mock(side_effect=RuntimeError)):
+        with patch.object(memory_fix.sys, "platform", "darwin"), patch.object(memory_fix, "_euid", return_value=0), \
+                patch.object(memory_fix, "_owner", Mock(side_effect=RuntimeError)):
             self.assertFalse(memory_fix.supports_fixes([ME]))
 
     def test_a_ping_that_fails_to_launch_is_false(self):

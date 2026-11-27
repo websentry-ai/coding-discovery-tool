@@ -29,9 +29,6 @@ REQUEST_TIMEOUT_SECONDS = 30
 HELPER_TIMEOUT_SECONDS = 30
 # The self-test runs before every root scan on macOS, so it gets less time than a fix.
 PING_TIMEOUT_SECONDS = 10
-# Below the backend's cap of 2000 files per post.
-FILES_PER_POST = 500
-RESULTS_PER_POST = 100
 RESULT_POST_TRIES = 3
 
 
@@ -82,7 +79,7 @@ def run_helper(request: Dict, uid: Optional[int], gid: Optional[int],
         as_user = {"user": uid, "group": gid, "extra_groups": []}
     try:
         child = subprocess.Popen(helper_command(), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                 stderr=subprocess.DEVNULL, env={}, cwd="/", close_fds=True, **as_user)
+                                 stderr=subprocess.DEVNULL, env={}, cwd="/", **as_user)
     except (OSError, ValueError, subprocess.SubprocessError) as e:
         logger.warning(f"Memory fix helper did not start: {type(e).__name__}")
         return None
@@ -206,27 +203,17 @@ def _post_json(link: _Link, path: str, body: Dict) -> Optional[Dict]:
 
 
 def _placements(link: _Link, posted: List[Dict]) -> Optional[List[Dict]]:
-    """Every answer the backend gave for the posted files, or None when a post failed."""
-    answers = []
-    for start in range(0, len(posted), FILES_PER_POST):
-        files = [{key: entry[key] for key in ("home_user", "file_path", "sha256")}
-                 for entry in posted[start:start + FILES_PER_POST]]
-        answer = _post_json(link, FIXES_PATH, {"device_id": link.device_id, "files": files})
-        fixes = answer.get("fixes") if answer else None
-        if not isinstance(fixes, list):
-            return None
-        answers.extend(fix for fix in fixes if isinstance(fix, dict))
-    return answers
+    """Every answer the backend gave for the posted files, or None when the post failed."""
+    files = [{key: entry[key] for key in ("home_user", "file_path", "sha256")} for entry in posted]
+    answer = _post_json(link, FIXES_PATH, {"device_id": link.device_id, "files": files})
+    fixes = answer.get("fixes") if answer else None
+    return [fix for fix in fixes if isinstance(fix, dict)] if isinstance(fixes, list) else None
 
 
-def _post_results(link: _Link, results: List[Dict]) -> bool:
-    """True when every result reached the backend; a post that fails is tried again, as the edit is already made."""
-    sent = True
-    for start in range(0, len(results), RESULTS_PER_POST):
-        body = {"device_id": link.device_id, "results": results[start:start + RESULTS_PER_POST]}
-        if not any(_post_json(link, RESULTS_PATH, body) is not None for _ in range(RESULT_POST_TRIES)):
-            sent = False
-    return sent
+def _post_result(link: _Link, result: Dict) -> bool:
+    """True when the result reached the backend; a post that fails is tried again, as the edit is already made."""
+    body = {"device_id": link.device_id, "results": [result]}
+    return any(_post_json(link, RESULTS_PATH, body) is not None for _ in range(RESULT_POST_TRIES))
 
 
 def _spans(answer: Dict) -> Optional[List[List[int]]]:
@@ -291,30 +278,28 @@ def _round(link: _Link, waiting: Dict[Tuple[str, str], Dict], counts: Counter) -
     if answers is None:
         return False
     still_pending = set()
-    try:
-        for answer in answers:
-            try:
-                key = (answer.get("home_user"), answer.get("file_path"))
-                if not all(isinstance(part, str) for part in key) or key not in posted:
-                    continue
-                status = answer.get("status")
-                if status == "pending":
-                    still_pending.add(key)
-                elif status != "ready":
-                    counts["changed" if status == "changed" else "unknown_status"] += 1
-                else:
-                    result = _apply(posted[key], answer, link.deadline)
-                    counts[_tally(result)] += 1
-                    # Reported at once, so a later slow post or the deadline cannot leave an edit unreported.
-                    if result and not _post_results(link, [result]):
-                        counts["results_post_failed"] += 1
-            except Exception as e:
-                counts["answer_error"] += 1
-                logger.warning(f"Memory fix answer skipped: {type(e).__name__}")
-    finally:
-        # Only a file the backend called pending is asked about again; any other has no fix waiting on this run.
-        for key in [key for key in waiting if key not in still_pending]:
-            del waiting[key]
+    for answer in answers:
+        try:
+            key = (answer.get("home_user"), answer.get("file_path"))
+            if not all(isinstance(part, str) for part in key) or key not in posted:
+                continue
+            status = answer.get("status")
+            if status == "pending":
+                still_pending.add(key)
+            elif status != "ready":
+                counts["changed" if status == "changed" else "unknown_status"] += 1
+            else:
+                result = _apply(posted[key], answer, link.deadline)
+                counts[_tally(result)] += 1
+                # Reported at once, so a later slow post or the deadline cannot leave an edit unreported.
+                if result and not _post_result(link, result):
+                    counts["results_post_failed"] += 1
+        except Exception as e:
+            counts["answer_error"] += 1
+            logger.warning(f"Memory fix answer skipped: {type(e).__name__}")
+    # Only a file the backend called pending is asked about again; any other has no fix waiting on this run.
+    for key in [key for key in waiting if key not in still_pending]:
+        del waiting[key]
     return True
 
 

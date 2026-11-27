@@ -126,6 +126,7 @@ try:
     from . import cache as discovery_cache
     from . import mcp_tools_cache
     from .claude_memory_helpers import collect_claude_memories, memory_scan_enabled
+    from . import memory_fix
     from .mcp_extraction_helpers import (
         claude_cli_and_desktop_share_account,
         extract_claudeai_mcp_servers_with_root_support,
@@ -217,6 +218,7 @@ except ImportError:
     from scripts.coding_discovery_tools import cache as discovery_cache
     from scripts.coding_discovery_tools import mcp_tools_cache
     from scripts.coding_discovery_tools.claude_memory_helpers import collect_claude_memories, memory_scan_enabled
+    from scripts.coding_discovery_tools import memory_fix
     from scripts.coding_discovery_tools.mcp_extraction_helpers import (
         claude_cli_and_desktop_share_account,
         extract_claudeai_mcp_servers_with_root_support,
@@ -4427,13 +4429,17 @@ def main():
         # Send scan in_progress event BEFORE scanning
         logger.info("Sending scan in_progress event...")
         scan_start_response: Dict = {}
+        can_fix_memory = memory_fix.supports_fixes(all_users)
         with time_step("send_in_progress", "send"):
             success, _ = send_scan_event(
                 args.domain, args.api_key, device_id, run_id, "in_progress",
                 args.app_name, sentry_context=sentry_ctx, system_user=system_user,
                 deadline=send_deadline, response=scan_start_response,
+                capabilities=[memory_fix.CAPABILITY] if can_fix_memory else None,
             )
         scan_memory = memory_scan_enabled(scan_start_response)
+        memory_fixes_pending = can_fix_memory and memory_fix.fixes_pending(scan_start_response)
+        memory_fix_files: List[Dict] = []
         if success:
             logger.info("✓ Scan in_progress event sent successfully")
         else:
@@ -4647,6 +4653,11 @@ def main():
                                 memories = collect_claude_memories(user_home, user_name)
                             if memories:
                                 tool_filtered["memories"] = memories
+                            if memory_fixes_pending:
+                                try:
+                                    memory_fix_files.extend(memory_fix.held_files(user_name, user_home, memories))
+                                except Exception as held_err:
+                                    logger.debug(f"    Memory fix file list failed for {user_name}: {held_err}")
 
                         # Generate report for this single tool with this user's data
                         # user_name is the home_user (from /Users directory)
@@ -5054,6 +5065,7 @@ def main():
             manifest=manifest, covered_home_users=covered,
             deadline=run_deadline, failure=completed_outcome,
         )
+        completed_sent = success
         if success:
             logger.info("✓ Scan completed event sent successfully")
         elif completed_outcome.get("kind") == "uncertain":
@@ -5092,6 +5104,16 @@ def main():
             logger.info(f"Connector UUID sweep: resolved {sent}, failed {failed}, matched {matched}")
         except Exception as sweep_err:
             logger.debug(f"Connector UUID sweep failed: {sweep_err}")
+
+        # Only after the completed event landed, so the backend compares against the scan just saved.
+        if completed_sent and memory_fixes_pending:
+            try:
+                memory_fix.apply_pending_fixes(
+                    args.domain, args.api_key, device_id, memory_fix_files,
+                    deadline=(run_deadline - tail_grace if run_deadline is not None else None),
+                )
+            except Exception as fix_err:
+                logger.warning(f"Memory file fixes failed: {fix_err}")
 
     except Exception as e:
         # Report the crash as a failed run (idempotent — the watchdog/signal

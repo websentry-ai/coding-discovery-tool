@@ -15,6 +15,7 @@ MAX_FILE_BYTES = 50 * 1024
 MAX_REQUEST_BYTES = 1024 * 1024
 FAILURE_REASONS = ("changed", "missing", "too_large", "not_utf8", "refused")
 _SHA256 = re.compile(r"[0-9a-fA-F]{64}")
+_RENAME_SWAP = 0x2  # macOS renameatx_np: exchange the two names in one step
 _DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
 _READ_FLAGS = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
 
@@ -156,6 +157,32 @@ def _write_temp(dir_fd: int, name: str, data: bytes, mode: int) -> str:
     return temp_name
 
 
+def _exchange(dir_fd: int, first: str, second: str) -> bool:
+    """Swaps two names in the folder in one atomic step where the OS can (macOS); False when it cannot."""
+    try:
+        import ctypes
+        swap = ctypes.CDLL(None, use_errno=True).renameatx_np
+        swap.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        return swap(dir_fd, os.fsencode(first), dir_fd, os.fsencode(second), _RENAME_SWAP) == 0
+    except (ImportError, OSError, AttributeError, TypeError, ValueError):
+        return False
+
+
+def _put_in_place(dir_fd: int, temp_name: str, name: str, before: os.stat_result) -> None:
+    """Makes the temp file the file, and undoes it if someone saved the file in that instant."""
+    if not _exchange(dir_fd, temp_name, name):
+        os.rename(temp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        return
+    # The swap is atomic, so the temp name now holds exactly what the fix replaced.
+    if _still_same(dir_fd, temp_name, before):
+        _remove(dir_fd, temp_name)
+        return
+    # A newer save was swapped out: it goes back, and the fix waits for the next scan.
+    if not _exchange(dir_fd, temp_name, name):
+        os.rename(temp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    raise _Failed("changed")
+
+
 def _swap_in(dir_fd: int, name: str, data: bytes, before: os.stat_result) -> None:
     """Replaces the file with data by temp file and rename, unless it changed since it was read."""
     try:
@@ -165,7 +192,7 @@ def _swap_in(dir_fd: int, name: str, data: bytes, before: os.stat_result) -> Non
     try:
         if not _still_same(dir_fd, name, before):
             raise _Failed("changed")
-        os.rename(temp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        _put_in_place(dir_fd, temp_name, name, before)
     except BaseException as error:
         _remove(dir_fd, temp_name)
         if isinstance(error, OSError):

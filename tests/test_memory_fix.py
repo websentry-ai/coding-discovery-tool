@@ -133,6 +133,27 @@ class HelperRefusesAndLeavesTheFileAlone(_Folder):
         self.assertEqual(path.read_bytes(), text + b" more")
         self.assert_only("m.md")
 
+    @unittest.skipUnless(sys.platform == "darwin", "the atomic swap is macOS only")
+    def test_a_save_landing_in_the_instant_of_the_swap_is_kept_and_no_temp_is_left(self):
+        text = b"t " + SECRET_A.encode()
+        path = self.write("m.md", text)
+        real = helper._exchange
+        saves = []
+
+        def saved_just_before(dir_fd, first, second):
+            if not saves:
+                saves.append(1)
+                newer = path.with_name("newer")
+                newer.write_bytes(text + b" and a line the user just added")
+                os.replace(newer, path)
+            return real(dir_fd, first, second)
+
+        with patch.object(helper, "_exchange", saved_just_before):
+            self.assert_failed(self.fix(path, text, [[2, len(text)]]), "changed")
+
+        self.assertEqual(path.read_bytes(), text + b" and a line the user just added")
+        self.assert_only("m.md")
+
     def test_a_symlinked_file_is_refused(self):
         outside = self.base / "outside.md"
         outside.write_bytes(b"t " + SECRET_A.encode())

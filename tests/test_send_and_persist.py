@@ -388,7 +388,7 @@ class TestScanEvents(unittest.TestCase):
 
         # Verify payload structure
         payload = json.loads(self.server.requests[0]["body"])
-        self.assertEqual(payload["device_id"], "DEVICE123")
+        self.assertEqual(payload["device_discovery_id"], "DEVICE123")
         self.assertEqual(payload["run_id"], "run-uuid-1234")
         self.assertEqual(payload["scan_event"], "in_progress")
         self.assertEqual(payload["app_name"], "JumpCloud")
@@ -501,6 +501,26 @@ class TestScanEvents(unittest.TestCase):
         self.assertEqual(payload["scan_event"], "failed")
         self.assertNotIn("home_user", payload)  # No user context for device-level errors
         self.assertEqual(payload["scan_error"]["error_type"], "RuntimeError")
+
+    @patch("time.sleep")
+    @patch.object(utils_mod, "_SENTRY_DSN", "")
+    def test_metrics_payload_names_the_device_with_the_new_key(self, _sleep):
+        """Metrics piggyback on the report endpoint, so they must carry the new wire key too."""
+        sent = utils_mod.send_discovery_metrics(
+            self.base_url,
+            "test-key",
+            "DEVICE123",
+            {"run_seconds": 1.5},
+            run_id="run-uuid-1234",
+        )
+
+        self.assertTrue(sent)
+        self.assertEqual(len(self.server.requests), 1)
+        payload = json.loads(self.server.requests[0]["body"])
+        self.assertEqual(payload["device_discovery_id"], "DEVICE123")
+        self.assertNotIn("device_id", payload)
+
+
 
 
 class TestSentryPriorityBypassesCap(unittest.TestCase):

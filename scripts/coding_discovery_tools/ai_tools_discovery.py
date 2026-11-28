@@ -3816,7 +3816,7 @@ class AIToolsDetector:
         report = {
             "home_user": home_user,
             "system_user": system_user or home_user,
-            "device_id": device_id,
+            "device_discovery_id": device_id,
             "is_container": in_container(),
             "tools": [tool_for_report]
         }
@@ -3848,7 +3848,7 @@ class AIToolsDetector:
 
         return {
             "system_user": user_info,
-            "device_id": device_id,
+            "device_discovery_id": device_id,
             "tools": tools_with_projects
         }
 

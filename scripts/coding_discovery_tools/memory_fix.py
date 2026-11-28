@@ -205,14 +205,14 @@ def _post_json(link: _Link, path: str, body: Dict) -> Optional[Dict]:
 def _placements(link: _Link, posted: List[Dict]) -> Optional[List[Dict]]:
     """Every answer the backend gave for the posted files, or None when the post failed."""
     files = [{key: entry[key] for key in ("home_user", "file_path", "sha256")} for entry in posted]
-    answer = _post_json(link, FIXES_PATH, {"device_id": link.device_id, "files": files})
+    answer = _post_json(link, FIXES_PATH, {"device_discovery_id": link.device_id, "files": files})
     fixes = answer.get("fixes") if answer else None
     return [fix for fix in fixes if isinstance(fix, dict)] if isinstance(fixes, list) else None
 
 
 def _post_result(link: _Link, result: Dict) -> bool:
     """True when the result reached the backend; a post that fails is tried again, as the edit is already made."""
-    body = {"device_id": link.device_id, "results": [result]}
+    body = {"device_discovery_id": link.device_id, "results": [result]}
     return any(_post_json(link, RESULTS_PATH, body) is not None for _ in range(RESULT_POST_TRIES))
 
 

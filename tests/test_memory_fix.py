@@ -484,13 +484,13 @@ class PollAsksTheBackend(_Files):
         counts = self.run_fixes([held])
 
         posted = self.fix_posts()[0]
-        self.assertEqual(posted, {"device_id": "dev-1", "files": [
+        self.assertEqual(posted, {"device_discovery_id": "dev-1", "files": [
             {"home_user": ME, "file_path": held["file_path"], "sha256": _sha(text.encode())}]})
         self.assertEqual(self.helper_calls[0][0], {
             "op": "fix", "file_path": held["file_path"], "memory_root": str(self.root),
             "sha256": _sha(text.encode()), "spans": [_span(text, SECRET_A)]})
         self.assertEqual(self.helper_calls[0][1:], (pwd.getpwnam(ME).pw_uid, pwd.getpwnam(ME).pw_gid))
-        self.assertEqual(self.result_posts(), [{"device_id": "dev-1", "results": [
+        self.assertEqual(self.result_posts(), [{"device_discovery_id": "dev-1", "results": [
             {"id": 7, "outcome": "fixed", "token": "T-7"}]}])
         self.assertEqual(Path(held["file_path"]).read_text(), "t " + MARKER)
         self.assertEqual(counts, {"rounds": 1, "fixed": 1})
